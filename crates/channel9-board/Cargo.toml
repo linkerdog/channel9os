@@ -1,0 +1,16 @@
+[package]
+name = "channel9-board"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+channel9-core = { path = "../channel9-core" }
+channel9-fs = { path = "../channel9-fs" }
+display-interface-spi = "0.4.1"
+embedded-graphics = "0.8.2"
+embedded-hal = "1"
+esp-idf-hal = "0.46.2"
+esp-idf-svc = "0.52.1"
+log = "0.4"
+mipidsi = "0.7.1"

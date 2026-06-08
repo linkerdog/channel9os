@@ -1,0 +1,12 @@
+[package]
+name = "channel9-wifi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+channel9-core = { path = "../channel9-core" }
+embedded-svc = "0.29.0"
+esp-idf-hal = "0.46.2"
+esp-idf-svc = "0.52.1"
+log = "0.4"

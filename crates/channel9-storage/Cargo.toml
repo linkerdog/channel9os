@@ -1,0 +1,11 @@
+[package]
+name = "channel9-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+channel9-core = { path = "../channel9-core" }
+channel9-fs = { path = "../channel9-fs" }
+littlefs2 = "0.7.1"
+serde_json = "1"

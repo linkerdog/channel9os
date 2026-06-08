@@ -1,0 +1,54 @@
+[package]
+name = "esp32_channel9"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = [
+    ".",
+    "crates/channel9-board",
+    "crates/channel9-ble",
+    "crates/channel9-core",
+    "crates/channel9-fs",
+    "crates/channel9-storage",
+    "crates/channel9-time",
+    "crates/channel9-ui",
+    "crates/channel9-wifi",
+]
+resolver = "2"
+
+[[bin]]
+name = "esp32_channel9"
+harness = false
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+strip = true
+
+[package.metadata.esp-idf-sys]
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "sdkconfig.defaults.ble"]
+
+[dependencies]
+anyhow = "1"
+channel9-ble = { path = "crates/channel9-ble" }
+channel9-board = { path = "crates/channel9-board" }
+channel9-core = { path = "crates/channel9-core" }
+channel9-fs = { path = "crates/channel9-fs" }
+channel9-storage = { path = "crates/channel9-storage" }
+channel9-time = { path = "crates/channel9-time" }
+channel9-ui = { path = "crates/channel9-ui" }
+channel9-wifi = { path = "crates/channel9-wifi" }
+esp-idf-hal = "0.46.2"
+esp-idf-svc = "0.52.1"
+heapless = "0.9"
+log = "0.4"
+
+[build-dependencies]
+embuild = "0.33"

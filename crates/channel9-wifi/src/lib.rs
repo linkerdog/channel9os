@@ -1,0 +1,171 @@
+use core::convert::TryInto;
+
+use anyhow::{Context, Result};
+use channel9_core::{WifiConfig, WifiCredential};
+use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
+use esp_idf_hal::modem::WifiModem;
+use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub channel: u8,
+    pub signal_dbm: i8,
+    pub auth_method: Option<AuthMethod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiConnectionInfo {
+    pub ssid: String,
+    pub ip: String,
+    pub gateway: String,
+    pub dns_primary: String,
+    pub dns_secondary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiStatus {
+    Disabled,
+    Idle,
+    Started,
+    Connected,
+    Failed,
+}
+
+pub struct Channel9Wifi {
+    wifi: BlockingWifi<EspWifi<'static>>,
+    status: WifiStatus,
+    last_ssid: Option<String>,
+    last_error: Option<String>,
+}
+
+impl Channel9Wifi {
+    pub fn new(modem: WifiModem<'static>) -> Result<Self> {
+        let sys_loop = EspSystemEventLoop::take()?;
+        let nvs = EspDefaultNvsPartition::take()?;
+        let wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
+
+        Ok(Self {
+            wifi,
+            status: WifiStatus::Idle,
+            last_ssid: None,
+            last_error: None,
+        })
+    }
+
+    pub fn status(&self) -> WifiStatus {
+        self.status
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub fn last_ssid(&self) -> Option<&str> {
+        self.last_ssid.as_deref()
+    }
+
+    pub fn connection_info(&self) -> Option<WifiConnectionInfo> {
+        if self.status != WifiStatus::Connected {
+            return None;
+        }
+
+        let ip_info = self.wifi.wifi().sta_netif().get_ip_info().ok()?;
+        let dns_primary = self.wifi.wifi().sta_netif().get_dns();
+        let dns_secondary = self.wifi.wifi().sta_netif().get_secondary_dns();
+        Some(WifiConnectionInfo {
+            ssid: self
+                .last_ssid
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            ip: ip_info.ip.to_string(),
+            gateway: ip_info.subnet.gateway.to_string(),
+            dns_primary: dns_primary.to_string(),
+            dns_secondary: dns_secondary.to_string(),
+        })
+    }
+
+    pub fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
+        if !self.wifi.is_started()? {
+            self.wifi.start()?;
+            self.status = WifiStatus::Started;
+        }
+
+        let mut networks: Vec<WifiNetwork> = self
+            .wifi
+            .scan()?
+            .into_iter()
+            .map(|ap| WifiNetwork {
+                ssid: ap.ssid.as_str().to_owned(),
+                channel: ap.channel,
+                signal_dbm: ap.signal_strength,
+                auth_method: ap.auth_method,
+            })
+            .collect();
+        networks.sort_by(|left, right| right.signal_dbm.cmp(&left.signal_dbm));
+        Ok(networks)
+    }
+
+    pub fn connect_first_saved(&mut self, config: &WifiConfig) -> Result<Option<String>> {
+        if !config.connect_at_startup {
+            self.status = WifiStatus::Disabled;
+            return Ok(None);
+        }
+
+        let Some(credential) = config.credentials.first() else {
+            self.status = WifiStatus::Idle;
+            self.last_ssid = None;
+            self.last_error = None;
+            return Ok(None);
+        };
+
+        self.connect(credential)?;
+        Ok(Some(credential.ssid.clone()))
+    }
+
+    pub fn connect(&mut self, credential: &WifiCredential) -> Result<()> {
+        self.last_ssid = Some(credential.ssid.clone());
+        self.last_error = None;
+
+        let configuration = Configuration::Client(ClientConfiguration {
+            ssid: credential
+                .ssid
+                .as_str()
+                .try_into()
+                .context("wifi ssid is too long")?,
+            bssid: None,
+            auth_method: if credential.password.is_empty() {
+                AuthMethod::None
+            } else {
+                AuthMethod::WPA2Personal
+            },
+            password: credential
+                .password
+                .as_str()
+                .try_into()
+                .context("wifi password is too long")?,
+            channel: None,
+            ..Default::default()
+        });
+
+        self.wifi.set_configuration(&configuration)?;
+        if !self.wifi.is_started()? {
+            self.wifi.start()?;
+        }
+        self.status = WifiStatus::Started;
+        let result = self.wifi.connect().and_then(|_| self.wifi.wait_netif_up());
+        match result {
+            Ok(()) => {
+                self.status = WifiStatus::Connected;
+                Ok(())
+            }
+            Err(err) => {
+                self.status = WifiStatus::Failed;
+                self.last_error = Some(format!("{err:?}"));
+                Err(err.into())
+            }
+        }
+    }
+}

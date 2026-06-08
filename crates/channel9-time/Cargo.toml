@@ -1,0 +1,11 @@
+[package]
+name = "channel9-time"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+channel9-core = { path = "../channel9-core" }
+esp-idf-svc = "0.52.1"
+heapless = "0.9"
+log = "0.4"
