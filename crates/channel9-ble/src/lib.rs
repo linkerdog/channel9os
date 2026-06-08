@@ -70,6 +70,16 @@ impl Channel9Ble {
         Ok(())
     }
 
+    pub fn stop_advertising(&self) -> Result<()> {
+        if self.status() == BleStatus::Advertising {
+            self.gap
+                .stop_advertising()
+                .context("failed to stop ble advertising")?;
+        }
+        self.set_status(BleStatus::Ready, None);
+        Ok(())
+    }
+
     pub fn status(&self) -> BleStatus {
         self.state
             .lock()

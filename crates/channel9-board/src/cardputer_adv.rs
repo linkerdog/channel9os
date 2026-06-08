@@ -41,8 +41,10 @@ const SDCARD_MOUNT_PATH: &str = "/sdcard";
 const SDCARD_MAX_OPEN_FILES: usize = 4;
 const SDCARD_DMA_BUFFER_SIZE: usize = 4096;
 const I2C_BAUDRATE_KHZ: u32 = 100;
-const AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
-const AUDIO_RECORDING_GAIN: f32 = 2.0;
+const AUDIO_SAMPLE_RATE_HZ: u32 = 16_000;
+const AUDIO_RECORDING_GAIN: f32 = 1.0;
+const AUDIO_DC_FILTER_SHIFT: u8 = 11;
+const AUDIO_SOFT_LIMIT_THRESHOLD: i32 = 28_000;
 const AUDIO_BUFFER_BYTES: usize = 2048;
 const AUDIO_DMA_BUFFER_COUNT: u32 = 8;
 const AUDIO_DMA_FRAMES_PER_BUFFER: u32 = 124;
@@ -252,6 +254,17 @@ impl CardputerAdv {
             .unwrap_or_else(AudioStatus::missing)
     }
 
+    pub fn set_speaker_volume_percent(&mut self, volume_percent: u8) -> Result<()> {
+        let Some(audio) = self.audio.as_mut() else {
+            anyhow::bail!("audio codec is not available");
+        };
+        let Some(i2c) = self.i2c.as_mut() else {
+            anyhow::bail!("audio i2c bus is not available");
+        };
+
+        audio.set_speaker_volume_percent(i2c, volume_percent)
+    }
+
     pub fn voice_recorder_available(&self) -> bool {
         self.sdcard_mounted() && self.audio.is_some() && self.i2s.is_some()
     }
@@ -283,6 +296,10 @@ impl CardputerAdv {
         file.write_all(&empty_header)
             .with_context(|| format!("failed to write wav placeholder {}", path.display()))?;
 
+        let speaker_was_ready = self.audio_status().speaker_ready;
+        if speaker_was_ready {
+            self.set_speaker_enabled(false)?;
+        }
         self.set_microphone_enabled(true)?;
         let i2s = self
             .i2s
@@ -290,11 +307,16 @@ impl CardputerAdv {
             .ok_or_else(|| anyhow::anyhow!("i2s is not available"))?;
         i2s.tx_enable()?;
         i2s.rx_enable()?;
+        log::info!("voice recording uses ES8311 hardware ALC and gentle software filter");
+
         self.recording = Some(VoiceRecording {
             file,
             path: path_text.clone(),
             data_bytes: 0,
             read_timeouts: 0,
+            sample_rate: AUDIO_SAMPLE_RATE_HZ,
+            denoiser: VoiceDenoiser::new(),
+            speaker_was_ready,
         });
 
         Ok(path_text)
@@ -318,6 +340,9 @@ impl CardputerAdv {
             Err(err) => return Err(err.into()),
         };
         if bytes_read > 0 {
+            recording
+                .denoiser
+                .process_pcm16_le(&mut buffer[..bytes_read]);
             apply_gain_to_pcm16_le(&mut buffer[..bytes_read], AUDIO_RECORDING_GAIN);
             recording.file.write_all(&buffer[..bytes_read])?;
             recording.data_bytes = recording.data_bytes.saturating_add(bytes_read as u32);
@@ -330,7 +355,7 @@ impl CardputerAdv {
         let Some(mut recording) = self.recording.take() else {
             return Ok(None);
         };
-        let rx_disable_result = if let Some(i2s) = self.i2s.as_mut() {
+        let i2s_disable_result = if let Some(i2s) = self.i2s.as_mut() {
             let rx_result = i2s.rx_disable().map_err(anyhow::Error::from);
             let tx_result = i2s.tx_disable().map_err(anyhow::Error::from);
             rx_result.and(tx_result)
@@ -338,11 +363,14 @@ impl CardputerAdv {
             Ok(())
         };
         let mic_disable_result = self.set_microphone_enabled(false);
-        rx_disable_result?;
+        i2s_disable_result?;
         mic_disable_result?;
+        if recording.speaker_was_ready {
+            self.set_speaker_enabled(true)?;
+        }
 
         recording.file.rewind()?;
-        let header = wav_header(recording.data_bytes, AUDIO_SAMPLE_RATE_HZ);
+        let header = wav_header(recording.data_bytes, recording.sample_rate);
         recording.file.write_all(&header)?;
         recording.file.flush()?;
         recording.file.close()?;
@@ -466,12 +494,34 @@ struct VoiceRecording {
     path: String,
     data_bytes: u32,
     read_timeouts: u32,
+    sample_rate: u32,
+    denoiser: VoiceDenoiser,
+    speaker_was_ready: bool,
+}
+
+struct VoiceDenoiser {
+    dc_estimate: i32,
+}
+
+impl VoiceDenoiser {
+    fn new() -> Self {
+        Self { dc_estimate: 0 }
+    }
+
+    fn process_pcm16_le(&mut self, buffer: &mut [u8]) {
+        for sample in buffer.chunks_exact_mut(2) {
+            let raw = i16::from_le_bytes([sample[0], sample[1]]) as i32;
+            self.dc_estimate += (raw - self.dc_estimate) >> AUDIO_DC_FILTER_SHIFT;
+
+            let centered = raw - self.dc_estimate;
+            let limited = soft_limit_i16(centered);
+            sample.copy_from_slice(&limited.to_le_bytes());
+        }
+    }
 }
 
 fn initialize_audio(i2c: &mut I2cDriver<'static>) -> Result<Es8311Codec> {
-    let mut codec = Es8311Codec::probe(i2c)?;
-    codec.enable_speaker(i2c)?;
-    Ok(codec)
+    Es8311Codec::probe(i2c)
 }
 
 fn initialize_i2s(
@@ -574,6 +624,18 @@ fn apply_gain_to_pcm16_le(buffer: &mut [u8], gain: f32) {
         let amplified = (value * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         sample.copy_from_slice(&amplified.to_le_bytes());
     }
+}
+
+fn soft_limit_i16(sample: i32) -> i16 {
+    let sign = if sample < 0 { -1 } else { 1 };
+    let magnitude = sample.abs();
+    let limited = if magnitude <= AUDIO_SOFT_LIMIT_THRESHOLD {
+        magnitude
+    } else {
+        let excess = magnitude - AUDIO_SOFT_LIMIT_THRESHOLD;
+        AUDIO_SOFT_LIMIT_THRESHOLD + excess / 4
+    };
+    (limited * sign).clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 struct RecordingFile {

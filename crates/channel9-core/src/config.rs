@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub wifi: WifiConfig,
     #[serde(default)]
     pub time: TimeConfig,
+    #[serde(default)]
+    pub audio: AudioConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +39,19 @@ pub struct TimeConfig {
     pub timezone_offset_minutes: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioConfig {
+    pub speaker_volume_percent: u8,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            speaker_volume_percent: 75,
+        }
+    }
+}
+
 impl Default for TimeConfig {
     fn default() -> Self {
         Self {
@@ -61,6 +76,7 @@ impl Default for AppConfig {
                 credentials: Vec::new(),
             },
             time: TimeConfig::default(),
+            audio: AudioConfig::default(),
         }
     }
 }
