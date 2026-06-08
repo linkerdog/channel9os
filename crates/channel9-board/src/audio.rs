@@ -179,6 +179,6 @@ fn write_reg(i2c: &mut I2cDriver<'static>, reg: u8, value: u8) -> Result<()> {
 }
 
 fn speaker_volume_register(volume_percent: u8) -> u8 {
-    let value = (volume_percent.min(100) as u16 * u8::MAX as u16) / 100;
+    let value = (volume_percent.min(100) as u16 * 0xBF) / 100;
     value as u8
 }

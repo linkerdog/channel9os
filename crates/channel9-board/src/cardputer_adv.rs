@@ -363,11 +363,14 @@ impl CardputerAdv {
             Ok(())
         };
         let mic_disable_result = self.set_microphone_enabled(false);
+        let speaker_enable_result = if recording.speaker_was_ready {
+            self.set_speaker_enabled(true)
+        } else {
+            Ok(())
+        };
         i2s_disable_result?;
         mic_disable_result?;
-        if recording.speaker_was_ready {
-            self.set_speaker_enabled(true)?;
-        }
+        speaker_enable_result?;
 
         recording.file.rewind()?;
         let header = wav_header(recording.data_bytes, recording.sample_rate);

@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_cha
 use std::thread;
 use std::time::Duration;
 
-const UI_SCHEDULER_STACK_BYTES: usize = 4096;
+const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn main() {
@@ -487,7 +487,10 @@ fn reduce_screen(
             }
             Screen::Time { selected }
         }
-        (Screen::Audio { .. }, InputEvent::Back) => Screen::Config { selected: 5 },
+        (Screen::Audio { .. }, InputEvent::Back) => {
+            save_config(board, config);
+            Screen::Config { selected: 5 }
+        }
         (Screen::Audio { selected }, InputEvent::Up) => Screen::Audio {
             selected: selected.saturating_sub(1),
         },
@@ -502,7 +505,10 @@ fn reduce_screen(
             adjust_speaker_volume(board, config, 5);
             Screen::Audio { selected: 0 }
         }
-        (Screen::Audio { selected: 1 }, InputEvent::Select) => Screen::Config { selected: 5 },
+        (Screen::Audio { selected: 1 }, InputEvent::Select) => {
+            save_config(board, config);
+            Screen::Config { selected: 5 }
+        }
         (Screen::Audio { selected }, _) => Screen::Audio { selected },
         (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 6 },
         (Screen::Recorder { selected }, InputEvent::Up | InputEvent::Left) => Screen::Recorder {
@@ -1419,7 +1425,6 @@ fn adjust_speaker_volume(board: &mut CardputerAdv, config: &mut AppConfig, delta
 
     config.audio.speaker_volume_percent = next;
     apply_audio_config(board, config);
-    save_config(board, config);
 }
 
 fn upsert_wifi_credential(config: &mut AppConfig, credential: WifiCredential) {
