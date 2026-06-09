@@ -252,6 +252,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "channel9-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "embedded-svc",
+ "esp-idf-svc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "channel9-core"
 version = "0.1.0"
 dependencies = [
@@ -780,6 +791,7 @@ dependencies = [
  "anyhow",
  "channel9-ble",
  "channel9-board",
+ "channel9-client",
  "channel9-core",
  "channel9-fs",
  "channel9-storage",

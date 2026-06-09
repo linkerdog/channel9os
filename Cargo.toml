@@ -8,6 +8,7 @@ members = [
     ".",
     "crates/channel9-board",
     "crates/channel9-ble",
+    "crates/channel9-client",
     "crates/channel9-core",
     "crates/channel9-fs",
     "crates/channel9-storage",
@@ -39,6 +40,7 @@ esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "sdkconfig.defaults.ble"]
 anyhow = "1"
 channel9-ble = { path = "crates/channel9-ble" }
 channel9-board = { path = "crates/channel9-board" }
+channel9-client = { path = "crates/channel9-client" }
 channel9-core = { path = "crates/channel9-core" }
 channel9-fs = { path = "crates/channel9-fs" }
 channel9-storage = { path = "crates/channel9-storage" }
