@@ -339,7 +339,10 @@ fn reduce_screen(
             3 => Screen::Files,
             4 => Screen::Time { selected: 0 },
             5 => Screen::Audio { selected: 0 },
-            6 => Screen::Channel9 { selected: 0 },
+            6 => {
+                ensure_channel9_device_code(board, wifi, config, channel9_login);
+                Screen::Channel9 { selected: 0 }
+            }
             7 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
@@ -548,35 +551,44 @@ fn reduce_screen(
             selected: selected.saturating_sub(1),
         },
         (Screen::Channel9 { selected }, InputEvent::Down | InputEvent::Right) => Screen::Channel9 {
-            selected: (selected + 1).min(CHANNEL9_ITEMS.len() - 1),
+            selected: (selected + 1).min(channel9_item_count(config).saturating_sub(1)),
         },
         (Screen::Channel9 { selected }, InputEvent::Select) => {
-            match selected {
-                0 => {
-                    channel9_input.clear();
-                    channel9_input.push_str(config.channel9.workspace_id.as_str());
-                    return Screen::Channel9Input {
-                        field: Channel9InputField::Workspace,
-                    };
+            if channel9_logged_in(config) {
+                match selected {
+                    5 => {
+                        config.channel9.access_token = None;
+                        config.channel9.token_expires_at = None;
+                        channel9_login.active_code = None;
+                        channel9_login.message = "Token cleared".to_owned();
+                        save_config(board, config);
+                        ensure_channel9_device_code(board, wifi, config, channel9_login);
+                        return Screen::Channel9 { selected: 0 };
+                    }
+                    6 => return Screen::Config { selected: 6 },
+                    _ => {}
                 }
-                1 => {
-                    channel9_input.clear();
-                    channel9_input.push_str(config.channel9.device_id.as_str());
-                    return Screen::Channel9Input {
-                        field: Channel9InputField::Device,
-                    };
+            } else {
+                match selected {
+                    0 | 3 => poll_channel9_device_token(board, wifi, config, channel9_login),
+                    1 => {
+                        channel9_input.clear();
+                        channel9_input.push_str(config.channel9.workspace_id.as_str());
+                        return Screen::Channel9Input {
+                            field: Channel9InputField::Workspace,
+                        };
+                    }
+                    2 => {
+                        channel9_input.clear();
+                        channel9_input.push_str(config.channel9.device_id.as_str());
+                        return Screen::Channel9Input {
+                            field: Channel9InputField::Device,
+                        };
+                    }
+                    4 => create_channel9_device_code(board, wifi, config, channel9_login),
+                    5 => return Screen::Config { selected: 6 },
+                    _ => {}
                 }
-                2 => create_channel9_device_code(board, wifi, config, channel9_login),
-                3 => poll_channel9_device_token(board, wifi, config, channel9_login),
-                4 => {
-                    config.channel9.access_token = None;
-                    config.channel9.token_expires_at = None;
-                    channel9_login.active_code = None;
-                    channel9_login.message = "Token cleared".to_owned();
-                    save_config(board, config);
-                }
-                5 => return Screen::Config { selected: 6 },
-                _ => {}
             }
             Screen::Channel9 { selected }
         }
@@ -602,6 +614,9 @@ fn reduce_screen(
             }
             channel9_input.clear();
             save_config(board, config);
+            channel9_login.active_code = None;
+            channel9_login.message.clear();
+            ensure_channel9_device_code(board, wifi, config, channel9_login);
             Screen::Channel9 { selected: 0 }
         }
         (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 7 },
@@ -656,7 +671,23 @@ const WIFI_ITEMS: &[&str] = &[
 const STORAGE_ITEMS: &[&str] = &["Prefer SD", "Mount Path", "Files", "Back"];
 const TIME_ITEMS: &[&str] = &["Auto Sync", "SNTP Server", "UTC Offset", "Sync Now", "Back"];
 const AUDIO_ITEMS: &[&str] = &["Volume", "Back"];
-const CHANNEL9_ITEMS: &[&str] = &["Workspace", "Device", "Login", "Poll", "Clear", "Back"];
+const CHANNEL9_LOGIN_ITEMS: &[&str] = &[
+    "User Code",
+    "Workspace",
+    "Device",
+    "Poll",
+    "Refresh",
+    "Back",
+];
+const CHANNEL9_STATUS_ITEMS: &[&str] = &[
+    "Status",
+    "Workspace",
+    "Device",
+    "Token",
+    "Expires",
+    "Clear",
+    "Back",
+];
 const SNTP_SERVERS: &[&str] = &[
     "ntp.tuna.tsinghua.edu.cn",
     "time.pool.aliyun.com",
@@ -1045,59 +1076,117 @@ fn render_screen(
             )
         }
         Screen::Channel9 { selected } => {
-            let token_value = channel9_token_label(config.channel9.access_token.as_ref());
-            let code_value = channel9_login
-                .active_code
-                .as_ref()
-                .map(|code| code.user_code.as_str())
-                .unwrap_or("-");
             let workspace = truncate_runtime_label(config.channel9.workspace_id.as_str());
             let device = truncate_runtime_label(config.channel9.device_id.as_str());
-            let items = [
-                SettingItem {
-                    label: CHANNEL9_ITEMS[0],
-                    value: workspace.as_str(),
-                    selected: selected == 0,
-                    enabled: true,
-                },
-                SettingItem {
-                    label: CHANNEL9_ITEMS[1],
-                    value: device.as_str(),
-                    selected: selected == 1,
-                    enabled: true,
-                },
-                SettingItem {
-                    label: CHANNEL9_ITEMS[2],
-                    value: code_value,
-                    selected: selected == 2,
-                    enabled: channel9_login_ready(config, wifi),
-                },
-                SettingItem {
-                    label: CHANNEL9_ITEMS[3],
-                    value: token_value,
-                    selected: selected == 3,
-                    enabled: channel9_login.active_code.is_some(),
-                },
-                SettingItem {
-                    label: CHANNEL9_ITEMS[4],
-                    value: "",
-                    selected: selected == 4,
-                    enabled: config.channel9.access_token.is_some()
-                        || channel9_login.active_code.is_some(),
-                },
-                SettingItem {
-                    label: CHANNEL9_ITEMS[5],
-                    value: "",
-                    selected: selected == 5,
-                    enabled: true,
-                },
-            ];
-            let visible_items = visible_setting_items(&items, selected);
-            let footer = if channel9_login.message.is_empty() {
-                "SEL: Edit/Login/Poll  ESC: Back"
+            let expires = channel9_epoch_label(config.channel9.token_expires_at);
+            let code_value = channel9_user_code_label(channel9_login);
+            let (items, footer) = if channel9_logged_in(config) {
+                (
+                    [
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[0],
+                            value: "logged in",
+                            selected: selected == 0,
+                            enabled: false,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[1],
+                            value: workspace.as_str(),
+                            selected: selected == 1,
+                            enabled: false,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[2],
+                            value: device.as_str(),
+                            selected: selected == 2,
+                            enabled: false,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[3],
+                            value: "saved",
+                            selected: selected == 3,
+                            enabled: false,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[4],
+                            value: expires.as_str(),
+                            selected: selected == 4,
+                            enabled: false,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[5],
+                            value: "",
+                            selected: selected == 5,
+                            enabled: true,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_STATUS_ITEMS[6],
+                            value: "",
+                            selected: selected == 6,
+                            enabled: true,
+                        },
+                    ],
+                    if channel9_login.message.is_empty() {
+                        "SEL: Clear  ESC: Back"
+                    } else {
+                        channel9_login.message.as_str()
+                    },
+                )
             } else {
-                channel9_login.message.as_str()
+                (
+                    [
+                        SettingItem {
+                            label: CHANNEL9_LOGIN_ITEMS[0],
+                            value: code_value.as_str(),
+                            selected: selected == 0,
+                            enabled: channel9_login.active_code.is_some(),
+                        },
+                        SettingItem {
+                            label: CHANNEL9_LOGIN_ITEMS[1],
+                            value: workspace.as_str(),
+                            selected: selected == 1,
+                            enabled: true,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_LOGIN_ITEMS[2],
+                            value: device.as_str(),
+                            selected: selected == 2,
+                            enabled: true,
+                        },
+                        SettingItem {
+                            label: CHANNEL9_LOGIN_ITEMS[3],
+                            value: "check",
+                            selected: selected == 3,
+                            enabled: channel9_login.active_code.is_some(),
+                        },
+                        SettingItem {
+                            label: CHANNEL9_LOGIN_ITEMS[4],
+                            value: "new",
+                            selected: selected == 4,
+                            enabled: channel9_login_ready(config, wifi),
+                        },
+                        SettingItem {
+                            label: CHANNEL9_LOGIN_ITEMS[5],
+                            value: "",
+                            selected: selected == 5,
+                            enabled: true,
+                        },
+                        SettingItem {
+                            label: "",
+                            value: "",
+                            selected: false,
+                            enabled: false,
+                        },
+                    ],
+                    if channel9_login.message.is_empty() {
+                        "SEL: Poll/Edit  ESC: Back"
+                    } else {
+                        channel9_login.message.as_str()
+                    },
+                )
             };
+            let visible_items =
+                visible_setting_items(&items[..channel9_item_count(config)], selected);
             channel9_ui::draw_settings_screen(
                 board.display_mut(),
                 "CHANNEL9",
@@ -1545,6 +1634,18 @@ fn create_channel9_device_code(
     }
 }
 
+fn ensure_channel9_device_code(
+    board: &CardputerAdv,
+    wifi: Option<&mut Channel9Wifi>,
+    config: &mut AppConfig,
+    login: &mut Channel9LoginState,
+) {
+    if channel9_logged_in(config) || login.active_code.is_some() {
+        return;
+    }
+    create_channel9_device_code(board, wifi, config, login);
+}
+
 fn poll_channel9_device_token(
     board: &CardputerAdv,
     wifi: Option<&mut Channel9Wifi>,
@@ -1594,12 +1695,36 @@ fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool
         && !config.channel9.device_id.trim().is_empty()
 }
 
-fn channel9_token_label(access_token: Option<&String>) -> &'static str {
-    if access_token.is_some() {
-        "saved"
+fn channel9_logged_in(config: &AppConfig) -> bool {
+    config.channel9.access_token.is_some()
+}
+
+fn channel9_item_count(config: &AppConfig) -> usize {
+    if channel9_logged_in(config) {
+        CHANNEL9_STATUS_ITEMS.len()
     } else {
-        "none"
+        CHANNEL9_LOGIN_ITEMS.len()
     }
+}
+
+fn channel9_user_code_label(login: &Channel9LoginState) -> heapless::String<24> {
+    let mut label = heapless::String::new();
+    if let Some(code) = login.active_code.as_ref() {
+        let _ = label.push_str(code.user_code.as_str());
+    } else {
+        let _ = label.push_str("-");
+    }
+    label
+}
+
+fn channel9_epoch_label(value: Option<i64>) -> heapless::String<24> {
+    let mut label = heapless::String::new();
+    if let Some(value) = value {
+        let _ = core::fmt::write(&mut label, format_args!("{value}"));
+    } else {
+        let _ = label.push_str("-");
+    }
+    label
 }
 
 fn truncate_runtime_label(value: &str) -> heapless::String<24> {
