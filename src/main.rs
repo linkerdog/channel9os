@@ -341,7 +341,9 @@ fn reduce_screen(
             5 => Screen::Audio { selected: 0 },
             6 => {
                 ensure_channel9_device_code(board, wifi, config, channel9_login);
-                Screen::Channel9 { selected: 0 }
+                Screen::Channel9 {
+                    selected: channel9_initial_selected(config),
+                }
             }
             7 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
@@ -1079,7 +1081,7 @@ fn render_screen(
             let workspace = truncate_runtime_label(config.channel9.workspace_id.as_str());
             let device = truncate_runtime_label(config.channel9.device_id.as_str());
             let expires = channel9_epoch_label(config.channel9.token_expires_at);
-            let code_value = channel9_user_code_label(channel9_login);
+            let code_value = channel9_user_code_label(config, wifi, channel9_login);
             let (items, footer) = if channel9_logged_in(config) {
                 (
                     [
@@ -1609,8 +1611,8 @@ fn create_channel9_device_code(
     login: &mut Channel9LoginState,
 ) {
     login.message.clear();
-    if !channel9_login_ready(config, wifi.as_deref()) {
-        login.message = "Set WiFi/workspace".to_owned();
+    if let Some(reason) = channel9_login_blocked_reason(config, wifi.as_deref()) {
+        login.message = reason.to_owned();
         return;
     }
 
@@ -1689,10 +1691,34 @@ fn poll_channel9_device_token(
 }
 
 fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
-    wifi.map(|wifi| wifi.status() == WifiStatus::Connected)
+    channel9_login_blocked_reason(config, wifi).is_none()
+}
+
+fn channel9_login_blocked_reason(
+    config: &AppConfig,
+    wifi: Option<&Channel9Wifi>,
+) -> Option<&'static str> {
+    if config.channel9.workspace_id.trim().is_empty() {
+        return Some("Set Workspace first");
+    }
+    if config.channel9.device_id.trim().is_empty() {
+        return Some("Set Device first");
+    }
+    if !wifi
+        .map(|wifi| wifi.status() == WifiStatus::Connected)
         .unwrap_or(false)
-        && !config.channel9.workspace_id.trim().is_empty()
-        && !config.channel9.device_id.trim().is_empty()
+    {
+        return Some("WiFi offline");
+    }
+    None
+}
+
+fn channel9_initial_selected(config: &AppConfig) -> usize {
+    if channel9_logged_in(config) || !config.channel9.workspace_id.trim().is_empty() {
+        0
+    } else {
+        1
+    }
 }
 
 fn channel9_logged_in(config: &AppConfig) -> bool {
@@ -1707,12 +1733,18 @@ fn channel9_item_count(config: &AppConfig) -> usize {
     }
 }
 
-fn channel9_user_code_label(login: &Channel9LoginState) -> heapless::String<24> {
+fn channel9_user_code_label(
+    config: &AppConfig,
+    wifi: Option<&Channel9Wifi>,
+    login: &Channel9LoginState,
+) -> heapless::String<24> {
     let mut label = heapless::String::new();
     if let Some(code) = login.active_code.as_ref() {
         let _ = label.push_str(code.user_code.as_str());
+    } else if let Some(reason) = channel9_login_blocked_reason(config, wifi) {
+        let _ = label.push_str(reason);
     } else {
-        let _ = label.push_str("-");
+        let _ = label.push_str("creating");
     }
     label
 }
