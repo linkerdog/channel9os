@@ -19,7 +19,6 @@ cargo install ldproxy
 cargo install espflash
 cargo install espup
 espup install
-. "$HOME/export-esp.sh"
 ```
 
 Then build the firmware:

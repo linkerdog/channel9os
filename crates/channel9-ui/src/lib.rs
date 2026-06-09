@@ -756,6 +756,9 @@ where
         "Storage" => draw_storage_icon(display, center, color),
         "Device" => draw_device_icon(display, center, color),
         "Files" => draw_files_icon(display, center, color),
+        "Time" => draw_time_icon(display, center, color),
+        "Audio" => draw_audio_icon(display, center, color),
+        "Recorder" => draw_recorder_icon(display, center, color),
         _ => draw_generic_icon(display, center, color),
     }
 }
@@ -864,12 +867,125 @@ where
     draw_text(display, "IO", Point::new(center.x - 6, center.y + 5), color)
 }
 
+fn draw_time_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    Circle::new(Point::new(center.x - 12, center.y - 12), 24)
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("time icon face draw failed: {err:?}"))?;
+    Circle::new(Point::new(center.x - 2, center.y - 2), 4)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("time icon hub draw failed: {err:?}"))?;
+    Line::new(center, Point::new(center.x, center.y - 8))
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("time icon hour hand draw failed: {err:?}"))?;
+    Line::new(center, Point::new(center.x + 7, center.y + 4))
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("time icon minute hand draw failed: {err:?}"))?;
+    Ok(())
+}
+
+fn draw_audio_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    Rectangle::new(Point::new(center.x - 16, center.y - 6), Size::new(7, 12))
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("audio icon grille draw failed: {err:?}"))?;
+    Triangle::new(
+        Point::new(center.x - 9, center.y - 10),
+        Point::new(center.x + 1, center.y - 4),
+        Point::new(center.x - 9, center.y + 4),
+    )
+    .into_styled(PrimitiveStyle::with_fill(color))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("audio icon speaker draw failed: {err:?}"))?;
+    Triangle::new(
+        Point::new(center.x - 9, center.y - 4),
+        Point::new(center.x + 1, center.y + 4),
+        Point::new(center.x - 9, center.y + 10),
+    )
+    .into_styled(PrimitiveStyle::with_fill(color))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("audio icon speaker draw failed: {err:?}"))?;
+
+    for diameter in [16_u32, 25_u32] {
+        Arc::new(
+            Point::new(center.x - 5, center.y - diameter as i32 / 2),
+            diameter,
+            315.0.deg(),
+            90.0.deg(),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("audio icon wave draw failed: {err:?}"))?;
+    }
+    Ok(())
+}
+
+fn draw_recorder_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    Rectangle::new(Point::new(center.x - 6, center.y - 14), Size::new(12, 22))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(color)
+                .stroke_width(2)
+                .build(),
+        )
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("recorder icon capsule draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 12, center.y - 2),
+        Point::new(center.x - 12, center.y + 2),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("recorder icon left level draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x + 12, center.y - 2),
+        Point::new(center.x + 12, center.y + 2),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("recorder icon right level draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x, center.y + 8),
+        Point::new(center.x, center.y + 14),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("recorder icon stem draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 8, center.y + 14),
+        Point::new(center.x + 8, center.y + 14),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("recorder icon base draw failed: {err:?}"))?;
+    Circle::new(Point::new(center.x - 2, center.y - 4), 4)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("recorder icon record dot draw failed: {err:?}"))?;
+    Ok(())
+}
+
 fn draw_generic_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
     D::Error: core::fmt::Debug,
 {
-    Rectangle::new(Point::new(center.x - 18, center.y - 18), Size::new(36, 36))
+    Rectangle::new(Point::new(center.x - 13, center.y - 13), Size::new(26, 26))
         .into_styled(PrimitiveStyle::with_stroke(color, 1))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("generic icon draw failed: {err:?}"))?;
