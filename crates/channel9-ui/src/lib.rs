@@ -896,30 +896,35 @@ where
     D: DrawTarget<Color = Rgb565>,
     D::Error: core::fmt::Debug,
 {
-    Rectangle::new(Point::new(center.x - 16, center.y - 6), Size::new(7, 12))
+    Rectangle::new(Point::new(center.x - 17, center.y - 7), Size::new(7, 14))
         .into_styled(PrimitiveStyle::with_fill(color))
         .draw(display)
-        .map_err(|err| anyhow::anyhow!("audio icon grille draw failed: {err:?}"))?;
-    Triangle::new(
-        Point::new(center.x - 9, center.y - 10),
-        Point::new(center.x + 1, center.y - 4),
-        Point::new(center.x - 9, center.y + 4),
+        .map_err(|err| anyhow::anyhow!("audio icon sound port draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 10, center.y - 7),
+        Point::new(center.x + 3, center.y - 14),
     )
-    .into_styled(PrimitiveStyle::with_fill(color))
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
     .draw(display)
-    .map_err(|err| anyhow::anyhow!("audio icon speaker draw failed: {err:?}"))?;
-    Triangle::new(
-        Point::new(center.x - 9, center.y - 4),
-        Point::new(center.x + 1, center.y + 4),
-        Point::new(center.x - 9, center.y + 10),
+    .map_err(|err| anyhow::anyhow!("audio icon horn draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x + 3, center.y - 14),
+        Point::new(center.x + 3, center.y + 14),
     )
-    .into_styled(PrimitiveStyle::with_fill(color))
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
     .draw(display)
-    .map_err(|err| anyhow::anyhow!("audio icon speaker draw failed: {err:?}"))?;
+    .map_err(|err| anyhow::anyhow!("audio icon horn draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x + 3, center.y + 14),
+        Point::new(center.x - 10, center.y + 7),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("audio icon horn draw failed: {err:?}"))?;
 
-    for diameter in [16_u32, 25_u32] {
+    for diameter in [15_u32, 24_u32] {
         Arc::new(
-            Point::new(center.x - 5, center.y - diameter as i32 / 2),
+            Point::new(center.x, center.y - diameter as i32 / 2),
             diameter,
             315.0.deg(),
             90.0.deg(),
