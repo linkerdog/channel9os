@@ -13,4 +13,4 @@ build-std = ["std", "panic_abort"]
 MCU = "esp32s3"
 ESP_IDF_VERSION = "v5.4.3"
 ESP_IDF_TOOLS_INSTALL_DIR = "global"
-CC_xtensa_esp32s3_espidf = "/Users/weizhenwang/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20250730/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc"
+CC_xtensa_esp32s3_espidf = "xtensa-esp32s3-elf-gcc"

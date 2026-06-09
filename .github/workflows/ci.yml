@@ -20,6 +20,9 @@ jobs:
           buildtargets: esp32s3
           ldproxy: true
 
+      - name: Configure target C compiler
+        run: echo "CC_xtensa_esp32s3_espidf=$(command -v xtensa-esp32s3-elf-gcc)" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --check
 
