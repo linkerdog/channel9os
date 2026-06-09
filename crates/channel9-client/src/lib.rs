@@ -4,6 +4,7 @@ use esp_idf_svc::http::client::EspHttpConnection;
 use serde::{Deserialize, Serialize};
 
 const RESPONSE_BUFFER_BYTES: usize = 4096;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel9HttpClient {
@@ -79,23 +80,38 @@ impl Channel9HttpClient {
             device_id,
             interfaces,
         };
-        let response =
+        let envelope =
             self.post_json::<_, DeviceCode>("/api/v1/channel9/device-codes", &request)?;
-        Ok(response)
+        if envelope.ok {
+            envelope
+                .data
+                .ok_or_else(|| anyhow::anyhow!("Channel9 response missing data"))
+        } else {
+            let error = envelope.error.unwrap_or_else(default_api_error);
+            anyhow::bail!("{}: {}", error.code, error.message);
+        }
     }
 
     pub fn poll_device_token(&self, device_code: &str) -> Result<PollToken> {
         let request = PollDeviceTokenRequest { device_code };
-        match self.post_json::<_, DeviceToken>("/api/v1/channel9/device-codes/token", &request) {
-            Ok(token) => Ok(PollToken::Approved(token)),
-            Err(error) if error.to_string().contains("authorization_pending") => {
+        let envelope =
+            self.post_json::<_, DeviceToken>("/api/v1/channel9/device-codes/token", &request)?;
+        if envelope.ok {
+            let token = envelope
+                .data
+                .ok_or_else(|| anyhow::anyhow!("Channel9 response missing data"))?;
+            Ok(PollToken::Approved(token))
+        } else {
+            let error = envelope.error.unwrap_or_else(default_api_error);
+            if error.code == "authorization_pending" {
                 Ok(PollToken::Pending)
+            } else {
+                anyhow::bail!("{}: {}", error.code, error.message);
             }
-            Err(error) => Err(error),
         }
     }
 
-    fn post_json<T, R>(&self, path: &str, payload: &T) -> Result<R>
+    fn post_json<T, R>(&self, path: &str, payload: &T) -> Result<ApiEnvelope<R>>
     where
         T: Serialize,
         R: for<'de> Deserialize<'de>,
@@ -123,21 +139,33 @@ impl Channel9HttpClient {
             if read == 0 {
                 break;
             }
+            if body.len() + read > MAX_RESPONSE_BYTES {
+                anyhow::bail!("Channel9 response exceeded {MAX_RESPONSE_BYTES} bytes");
+            }
             body.extend_from_slice(&buffer[..read]);
         }
 
-        let envelope: ApiEnvelope<R> = serde_json::from_slice(&body)
-            .with_context(|| format!("failed to parse Channel9 response from {url}"))?;
-        if !envelope.ok || !(200..300).contains(&status) {
-            let error = envelope.error.unwrap_or(ApiErrorBody {
-                code: "channel9_request_failed".to_owned(),
-                message: format!("Channel9 request failed with HTTP {status}"),
-            });
-            anyhow::bail!("{}: {}", error.code, error.message);
+        match serde_json::from_slice::<ApiEnvelope<R>>(&body) {
+            Ok(envelope) => {
+                if envelope.ok && !(200..300).contains(&status) {
+                    anyhow::bail!("Channel9 request failed with HTTP {status}");
+                }
+                Ok(envelope)
+            }
+            Err(error) if !(200..300).contains(&status) => {
+                anyhow::bail!("Channel9 request failed with HTTP {status}: {error}");
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to parse Channel9 response from {url}"))
+            }
         }
-        envelope
-            .data
-            .ok_or_else(|| anyhow::anyhow!("Channel9 response missing data"))
+    }
+}
+
+fn default_api_error() -> ApiErrorBody {
+    ApiErrorBody {
+        code: "channel9_request_failed".to_owned(),
+        message: "Channel9 request failed".to_owned(),
     }
 }
 

@@ -1729,10 +1729,14 @@ fn channel9_epoch_label(value: Option<i64>) -> heapless::String<24> {
 
 fn truncate_runtime_label(value: &str) -> heapless::String<24> {
     let mut output = heapless::String::<24>::new();
-    for ch in value.chars().take(23) {
+    let mut chars = value.chars();
+    for _ in 0..23 {
+        let Some(ch) = chars.next() else {
+            return output;
+        };
         let _ = output.push(ch);
     }
-    if value.chars().count() > 23 {
+    if chars.next().is_some() {
         let _ = output.push('~');
     }
     output
