@@ -1,6 +1,12 @@
 use anyhow::{Context, Result};
 use channel9_core::{DeviceId, SdCardPins};
 use display_interface_spi::SPIInterfaceNoCS;
+use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10};
+use embedded_graphics::mono_font::MonoTextStyle;
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+use embedded_graphics::text::Text;
 use embedded_hal::spi::MODE_3;
 use esp_idf_hal::delay::Ets;
 use esp_idf_hal::gpio::{
@@ -51,6 +57,8 @@ const AUDIO_DMA_FRAMES_PER_BUFFER: u32 = 124;
 const AUDIO_READ_TIMEOUT_TICKS: u32 = 100;
 const AUDIO_WRITE_TIMEOUT_TICKS: u32 = 100;
 const WAV_HEADER_BYTES: usize = 44;
+const STARTUP_PROGRESS_WIDTH: u32 = 184;
+const STARTUP_PROGRESS_HEIGHT: u32 = 10;
 
 type DisplayInterface<'a> =
     SPIInterfaceNoCS<SpiDeviceDriver<'a, SpiDriver<'a>>, PinDriver<'a, Output>>;
@@ -135,51 +143,6 @@ impl CardputerAdv {
             &spi_config,
         )?;
 
-        let sdcard = mount_sdcard(
-            peripherals.spi3,
-            pins.gpio40,
-            pins.gpio14,
-            pins.gpio39,
-            pins.gpio12,
-        )
-        .map_err(|err| anyhow::anyhow!("sdcard mount failed: {err:?}"))
-        .inspect_err(|err| log::warn!("{err:?}"))
-        .ok();
-
-        let mut i2c = I2cDriver::new(
-            peripherals.i2c1,
-            pins.gpio8,
-            pins.gpio9,
-            &i2c_config::Config::new().baudrate(I2C_BAUDRATE_KHZ.kHz().into()),
-        )
-        .inspect_err(|err| log::warn!("i2c init failed: {err:?}"))
-        .ok();
-
-        let keyboard = i2c.as_mut().and_then(|i2c| {
-            Tca8418Keyboard::new(i2c)
-                .inspect_err(|err| log::warn!("keyboard init failed: {err:?}"))
-                .ok()
-        });
-        let imu = i2c.as_mut().and_then(|i2c| {
-            Bmi270::probe(i2c)
-                .inspect_err(|err| log::warn!("imu probe failed: {err:?}"))
-                .ok()
-        });
-        let audio = i2c.as_mut().and_then(|i2c| {
-            initialize_audio(i2c)
-                .inspect_err(|err| log::warn!("audio init failed: {err:?}"))
-                .ok()
-        });
-        let i2s = initialize_i2s(
-            peripherals.i2s0,
-            pins.gpio41,
-            pins.gpio46,
-            pins.gpio42,
-            pins.gpio43,
-        )
-        .inspect_err(|err| log::warn!("i2s init failed: {err:?}"))
-        .ok();
-
         let interface = SPIInterfaceNoCS::new(spi, dc);
         let mut delay = Ets;
 
@@ -203,6 +166,60 @@ impl CardputerAdv {
         display
             .set_scroll_offset(0)
             .map_err(|err| anyhow::anyhow!("scroll offset reset failed: {err:?}"))?;
+        backlight.set_duty(backlight.get_max_duty())?;
+        draw_startup_screen(&mut display, "Display", 15)?;
+
+        let sdcard = mount_sdcard(
+            peripherals.spi3,
+            pins.gpio40,
+            pins.gpio14,
+            pins.gpio39,
+            pins.gpio12,
+        )
+        .map_err(|err| anyhow::anyhow!("sdcard mount failed: {err:?}"))
+        .inspect_err(|err| log::warn!("{err:?}"))
+        .ok();
+        draw_startup_screen(&mut display, "Storage", 35)?;
+
+        let mut i2c = I2cDriver::new(
+            peripherals.i2c1,
+            pins.gpio8,
+            pins.gpio9,
+            &i2c_config::Config::new().baudrate(I2C_BAUDRATE_KHZ.kHz().into()),
+        )
+        .inspect_err(|err| log::warn!("i2c init failed: {err:?}"))
+        .ok();
+        draw_startup_screen(&mut display, "Input", 50)?;
+
+        let keyboard = i2c.as_mut().and_then(|i2c| {
+            Tca8418Keyboard::new(i2c)
+                .inspect_err(|err| log::warn!("keyboard init failed: {err:?}"))
+                .ok()
+        });
+        let imu = i2c.as_mut().and_then(|i2c| {
+            Bmi270::probe(i2c)
+                .inspect_err(|err| log::warn!("imu probe failed: {err:?}"))
+                .ok()
+        });
+        draw_startup_screen(&mut display, "Sensors", 65)?;
+
+        let audio = i2c.as_mut().and_then(|i2c| {
+            initialize_audio(i2c)
+                .inspect_err(|err| log::warn!("audio init failed: {err:?}"))
+                .ok()
+        });
+        draw_startup_screen(&mut display, "Audio", 80)?;
+
+        let i2s = initialize_i2s(
+            peripherals.i2s0,
+            pins.gpio41,
+            pins.gpio46,
+            pins.gpio42,
+            pins.gpio43,
+        )
+        .inspect_err(|err| log::warn!("i2s init failed: {err:?}"))
+        .ok();
+        draw_startup_screen(&mut display, "Ready", 95)?;
 
         Ok(Self {
             display,
@@ -490,6 +507,57 @@ impl CardputerAdv {
             audio.disable_speaker(i2c)
         }
     }
+}
+
+fn draw_startup_screen(display: &mut LcdDisplay<'static>, stage: &str, progress: u8) -> Result<()> {
+    let progress = progress.min(100);
+    let fill_width = STARTUP_PROGRESS_WIDTH * progress as u32 / 100;
+    let bg = Rgb565::new(28, 57, 28);
+    let bar = Rgb565::new(0, 28, 31);
+    let text = Rgb565::new(31, 63, 31);
+    let muted = Rgb565::new(18, 38, 18);
+    let accent = Rgb565::new(31, 36, 0);
+
+    display
+        .clear(bg)
+        .map_err(|err| anyhow::anyhow!("startup clear failed: {err:?}"))?;
+    Text::new(
+        "Channel9",
+        Point::new(60, 42),
+        MonoTextStyle::new(&FONT_10X20, text),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("startup title draw failed: {err:?}"))?;
+    Text::new(
+        stage,
+        Point::new(60, 62),
+        MonoTextStyle::new(&FONT_6X10, muted),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("startup stage draw failed: {err:?}"))?;
+    Rectangle::new(
+        Point::new(28, 82),
+        Size::new(STARTUP_PROGRESS_WIDTH, STARTUP_PROGRESS_HEIGHT),
+    )
+    .into_styled(
+        PrimitiveStyleBuilder::new()
+            .stroke_color(bar)
+            .stroke_width(1)
+            .build(),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("startup progress frame draw failed: {err:?}"))?;
+    if fill_width > 2 {
+        Rectangle::new(
+            Point::new(30, 84),
+            Size::new(fill_width.saturating_sub(4), STARTUP_PROGRESS_HEIGHT - 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(accent))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("startup progress fill draw failed: {err:?}"))?;
+    }
+
+    Ok(())
 }
 
 struct VoiceRecording {
