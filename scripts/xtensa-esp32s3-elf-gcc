@@ -5,7 +5,17 @@ if command -v xtensa-esp32s3-elf-gcc >/dev/null 2>&1; then
     exec xtensa-esp32s3-elf-gcc "$@"
 fi
 
-compiler_path="$(find "$HOME/.espressif/tools" -path '*xtensa-esp32s3-elf-gcc' -type f 2>/dev/null | sort | tail -n 1)"
+compiler_path=""
+for path in "$HOME"/.espressif/tools/*/*/*/bin/xtensa-esp32s3-elf-gcc; do
+    if [ -f "$path" ]; then
+        compiler_path="$path"
+    fi
+done
+
+if [ -z "$compiler_path" ]; then
+    compiler_path="$(find "$HOME/.espressif/tools" -path '*xtensa-esp32s3-elf-gcc' -type f 2>/dev/null | sort | tail -n 1)"
+fi
+
 if [ -z "$compiler_path" ]; then
     echo "xtensa-esp32s3-elf-gcc was not found. Run 'espup install' first." >&2
     exit 1
