@@ -1,6 +1,12 @@
 use anyhow::{Context, Result};
 use channel9_core::{DeviceId, SdCardPins};
 use display_interface_spi::SPIInterfaceNoCS;
+use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10};
+use embedded_graphics::mono_font::MonoTextStyle;
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+use embedded_graphics::text::Text;
 use embedded_hal::spi::MODE_3;
 use esp_idf_hal::delay::Ets;
 use esp_idf_hal::gpio::{
@@ -41,14 +47,18 @@ const SDCARD_MOUNT_PATH: &str = "/sdcard";
 const SDCARD_MAX_OPEN_FILES: usize = 4;
 const SDCARD_DMA_BUFFER_SIZE: usize = 4096;
 const I2C_BAUDRATE_KHZ: u32 = 100;
-const AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
-const AUDIO_RECORDING_GAIN: f32 = 2.0;
+const AUDIO_SAMPLE_RATE_HZ: u32 = 16_000;
+const AUDIO_RECORDING_GAIN: f32 = 1.0;
+const AUDIO_DC_FILTER_SHIFT: u8 = 11;
+const AUDIO_SOFT_LIMIT_THRESHOLD: i32 = 28_000;
 const AUDIO_BUFFER_BYTES: usize = 2048;
 const AUDIO_DMA_BUFFER_COUNT: u32 = 8;
 const AUDIO_DMA_FRAMES_PER_BUFFER: u32 = 124;
 const AUDIO_READ_TIMEOUT_TICKS: u32 = 100;
 const AUDIO_WRITE_TIMEOUT_TICKS: u32 = 100;
 const WAV_HEADER_BYTES: usize = 44;
+const STARTUP_PROGRESS_WIDTH: u32 = 184;
+const STARTUP_PROGRESS_HEIGHT: u32 = 10;
 
 type DisplayInterface<'a> =
     SPIInterfaceNoCS<SpiDeviceDriver<'a, SpiDriver<'a>>, PinDriver<'a, Output>>;
@@ -133,51 +143,6 @@ impl CardputerAdv {
             &spi_config,
         )?;
 
-        let sdcard = mount_sdcard(
-            peripherals.spi3,
-            pins.gpio40,
-            pins.gpio14,
-            pins.gpio39,
-            pins.gpio12,
-        )
-        .map_err(|err| anyhow::anyhow!("sdcard mount failed: {err:?}"))
-        .inspect_err(|err| log::warn!("{err:?}"))
-        .ok();
-
-        let mut i2c = I2cDriver::new(
-            peripherals.i2c1,
-            pins.gpio8,
-            pins.gpio9,
-            &i2c_config::Config::new().baudrate(I2C_BAUDRATE_KHZ.kHz().into()),
-        )
-        .inspect_err(|err| log::warn!("i2c init failed: {err:?}"))
-        .ok();
-
-        let keyboard = i2c.as_mut().and_then(|i2c| {
-            Tca8418Keyboard::new(i2c)
-                .inspect_err(|err| log::warn!("keyboard init failed: {err:?}"))
-                .ok()
-        });
-        let imu = i2c.as_mut().and_then(|i2c| {
-            Bmi270::probe(i2c)
-                .inspect_err(|err| log::warn!("imu probe failed: {err:?}"))
-                .ok()
-        });
-        let audio = i2c.as_mut().and_then(|i2c| {
-            initialize_audio(i2c)
-                .inspect_err(|err| log::warn!("audio init failed: {err:?}"))
-                .ok()
-        });
-        let i2s = initialize_i2s(
-            peripherals.i2s0,
-            pins.gpio41,
-            pins.gpio46,
-            pins.gpio42,
-            pins.gpio43,
-        )
-        .inspect_err(|err| log::warn!("i2s init failed: {err:?}"))
-        .ok();
-
         let interface = SPIInterfaceNoCS::new(spi, dc);
         let mut delay = Ets;
 
@@ -201,6 +166,60 @@ impl CardputerAdv {
         display
             .set_scroll_offset(0)
             .map_err(|err| anyhow::anyhow!("scroll offset reset failed: {err:?}"))?;
+        backlight.set_duty(backlight.get_max_duty())?;
+        draw_startup_screen(&mut display, "Display", 15)?;
+
+        let sdcard = mount_sdcard(
+            peripherals.spi3,
+            pins.gpio40,
+            pins.gpio14,
+            pins.gpio39,
+            pins.gpio12,
+        )
+        .map_err(|err| anyhow::anyhow!("sdcard mount failed: {err:?}"))
+        .inspect_err(|err| log::warn!("{err:?}"))
+        .ok();
+        draw_startup_screen(&mut display, "Storage", 35)?;
+
+        let mut i2c = I2cDriver::new(
+            peripherals.i2c1,
+            pins.gpio8,
+            pins.gpio9,
+            &i2c_config::Config::new().baudrate(I2C_BAUDRATE_KHZ.kHz().into()),
+        )
+        .inspect_err(|err| log::warn!("i2c init failed: {err:?}"))
+        .ok();
+        draw_startup_screen(&mut display, "Input", 50)?;
+
+        let keyboard = i2c.as_mut().and_then(|i2c| {
+            Tca8418Keyboard::new(i2c)
+                .inspect_err(|err| log::warn!("keyboard init failed: {err:?}"))
+                .ok()
+        });
+        let imu = i2c.as_mut().and_then(|i2c| {
+            Bmi270::probe(i2c)
+                .inspect_err(|err| log::warn!("imu probe failed: {err:?}"))
+                .ok()
+        });
+        draw_startup_screen(&mut display, "Sensors", 65)?;
+
+        let audio = i2c.as_mut().and_then(|i2c| {
+            initialize_audio(i2c)
+                .inspect_err(|err| log::warn!("audio init failed: {err:?}"))
+                .ok()
+        });
+        draw_startup_screen(&mut display, "Audio", 80)?;
+
+        let i2s = initialize_i2s(
+            peripherals.i2s0,
+            pins.gpio41,
+            pins.gpio46,
+            pins.gpio42,
+            pins.gpio43,
+        )
+        .inspect_err(|err| log::warn!("i2s init failed: {err:?}"))
+        .ok();
+        draw_startup_screen(&mut display, "Ready", 95)?;
 
         Ok(Self {
             display,
@@ -252,6 +271,17 @@ impl CardputerAdv {
             .unwrap_or_else(AudioStatus::missing)
     }
 
+    pub fn set_speaker_volume_percent(&mut self, volume_percent: u8) -> Result<()> {
+        let Some(audio) = self.audio.as_mut() else {
+            anyhow::bail!("audio codec is not available");
+        };
+        let Some(i2c) = self.i2c.as_mut() else {
+            anyhow::bail!("audio i2c bus is not available");
+        };
+
+        audio.set_speaker_volume_percent(i2c, volume_percent)
+    }
+
     pub fn voice_recorder_available(&self) -> bool {
         self.sdcard_mounted() && self.audio.is_some() && self.i2s.is_some()
     }
@@ -283,6 +313,10 @@ impl CardputerAdv {
         file.write_all(&empty_header)
             .with_context(|| format!("failed to write wav placeholder {}", path.display()))?;
 
+        let speaker_was_ready = self.audio_status().speaker_ready;
+        if speaker_was_ready {
+            self.set_speaker_enabled(false)?;
+        }
         self.set_microphone_enabled(true)?;
         let i2s = self
             .i2s
@@ -290,11 +324,16 @@ impl CardputerAdv {
             .ok_or_else(|| anyhow::anyhow!("i2s is not available"))?;
         i2s.tx_enable()?;
         i2s.rx_enable()?;
+        log::info!("voice recording uses ES8311 hardware ALC and gentle software filter");
+
         self.recording = Some(VoiceRecording {
             file,
             path: path_text.clone(),
             data_bytes: 0,
             read_timeouts: 0,
+            sample_rate: AUDIO_SAMPLE_RATE_HZ,
+            denoiser: VoiceDenoiser::new(),
+            speaker_was_ready,
         });
 
         Ok(path_text)
@@ -318,6 +357,9 @@ impl CardputerAdv {
             Err(err) => return Err(err.into()),
         };
         if bytes_read > 0 {
+            recording
+                .denoiser
+                .process_pcm16_le(&mut buffer[..bytes_read]);
             apply_gain_to_pcm16_le(&mut buffer[..bytes_read], AUDIO_RECORDING_GAIN);
             recording.file.write_all(&buffer[..bytes_read])?;
             recording.data_bytes = recording.data_bytes.saturating_add(bytes_read as u32);
@@ -330,7 +372,7 @@ impl CardputerAdv {
         let Some(mut recording) = self.recording.take() else {
             return Ok(None);
         };
-        let rx_disable_result = if let Some(i2s) = self.i2s.as_mut() {
+        let i2s_disable_result = if let Some(i2s) = self.i2s.as_mut() {
             let rx_result = i2s.rx_disable().map_err(anyhow::Error::from);
             let tx_result = i2s.tx_disable().map_err(anyhow::Error::from);
             rx_result.and(tx_result)
@@ -338,11 +380,17 @@ impl CardputerAdv {
             Ok(())
         };
         let mic_disable_result = self.set_microphone_enabled(false);
-        rx_disable_result?;
+        let speaker_enable_result = if recording.speaker_was_ready {
+            self.set_speaker_enabled(true)
+        } else {
+            Ok(())
+        };
+        i2s_disable_result?;
         mic_disable_result?;
+        speaker_enable_result?;
 
         recording.file.rewind()?;
-        let header = wav_header(recording.data_bytes, AUDIO_SAMPLE_RATE_HZ);
+        let header = wav_header(recording.data_bytes, recording.sample_rate);
         recording.file.write_all(&header)?;
         recording.file.flush()?;
         recording.file.close()?;
@@ -461,17 +509,90 @@ impl CardputerAdv {
     }
 }
 
+fn draw_startup_screen(display: &mut LcdDisplay<'static>, stage: &str, progress: u8) -> Result<()> {
+    let progress = progress.min(100);
+    let fill_width = STARTUP_PROGRESS_WIDTH * progress as u32 / 100;
+    let bg = Rgb565::new(28, 57, 28);
+    let bar = Rgb565::new(0, 28, 31);
+    let text = Rgb565::new(31, 63, 31);
+    let muted = Rgb565::new(18, 38, 18);
+    let accent = Rgb565::new(31, 36, 0);
+
+    display
+        .clear(bg)
+        .map_err(|err| anyhow::anyhow!("startup clear failed: {err:?}"))?;
+    Text::new(
+        "Channel9",
+        Point::new(60, 42),
+        MonoTextStyle::new(&FONT_10X20, text),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("startup title draw failed: {err:?}"))?;
+    Text::new(
+        stage,
+        Point::new(60, 62),
+        MonoTextStyle::new(&FONT_6X10, muted),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("startup stage draw failed: {err:?}"))?;
+    Rectangle::new(
+        Point::new(28, 82),
+        Size::new(STARTUP_PROGRESS_WIDTH, STARTUP_PROGRESS_HEIGHT),
+    )
+    .into_styled(
+        PrimitiveStyleBuilder::new()
+            .stroke_color(bar)
+            .stroke_width(1)
+            .build(),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("startup progress frame draw failed: {err:?}"))?;
+    if fill_width > 2 {
+        Rectangle::new(
+            Point::new(30, 84),
+            Size::new(fill_width.saturating_sub(4), STARTUP_PROGRESS_HEIGHT - 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(accent))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("startup progress fill draw failed: {err:?}"))?;
+    }
+
+    Ok(())
+}
+
 struct VoiceRecording {
     file: RecordingFile,
     path: String,
     data_bytes: u32,
     read_timeouts: u32,
+    sample_rate: u32,
+    denoiser: VoiceDenoiser,
+    speaker_was_ready: bool,
+}
+
+struct VoiceDenoiser {
+    dc_estimate: i32,
+}
+
+impl VoiceDenoiser {
+    fn new() -> Self {
+        Self { dc_estimate: 0 }
+    }
+
+    fn process_pcm16_le(&mut self, buffer: &mut [u8]) {
+        for sample in buffer.chunks_exact_mut(2) {
+            let raw = i16::from_le_bytes([sample[0], sample[1]]) as i32;
+            self.dc_estimate += (raw - self.dc_estimate) >> AUDIO_DC_FILTER_SHIFT;
+
+            let centered = raw - self.dc_estimate;
+            let limited = soft_limit_i16(centered);
+            sample.copy_from_slice(&limited.to_le_bytes());
+        }
+    }
 }
 
 fn initialize_audio(i2c: &mut I2cDriver<'static>) -> Result<Es8311Codec> {
-    let mut codec = Es8311Codec::probe(i2c)?;
-    codec.enable_speaker(i2c)?;
-    Ok(codec)
+    Es8311Codec::probe(i2c)
 }
 
 fn initialize_i2s(
@@ -574,6 +695,18 @@ fn apply_gain_to_pcm16_le(buffer: &mut [u8], gain: f32) {
         let amplified = (value * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         sample.copy_from_slice(&amplified.to_le_bytes());
     }
+}
+
+fn soft_limit_i16(sample: i32) -> i16 {
+    let sign = if sample < 0 { -1 } else { 1 };
+    let magnitude = sample.abs();
+    let limited = if magnitude <= AUDIO_SOFT_LIMIT_THRESHOLD {
+        magnitude
+    } else {
+        let excess = magnitude - AUDIO_SOFT_LIMIT_THRESHOLD;
+        AUDIO_SOFT_LIMIT_THRESHOLD + excess / 4
+    };
+    (limited * sign).clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 struct RecordingFile {

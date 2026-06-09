@@ -125,6 +125,19 @@ impl Channel9Wifi {
         Ok(Some(credential.ssid.clone()))
     }
 
+    pub fn stop(&mut self) -> Result<()> {
+        if self.wifi.is_connected()? {
+            self.wifi
+                .disconnect()
+                .context("failed to disconnect wifi")?;
+        }
+        if self.wifi.is_started()? {
+            self.wifi.stop().context("failed to stop wifi")?;
+        }
+        self.status = WifiStatus::Idle;
+        Ok(())
+    }
+
     pub fn connect(&mut self, credential: &WifiCredential) -> Result<()> {
         self.last_ssid = Some(credential.ssid.clone());
         self.last_error = None;

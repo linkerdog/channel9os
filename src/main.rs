@@ -8,8 +8,14 @@ use channel9_ui::{
     FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
 };
 use channel9_wifi::{Channel9Wifi, WifiNetwork, WifiStatus};
-use esp_idf_hal::delay::Ets;
+use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::thread;
+use std::time::Duration;
+
+const UI_SCHEDULER_STACK_BYTES: usize = 8192;
+const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -23,7 +29,7 @@ fn main() {
     }
 
     loop {
-        Ets::delay_ms(10);
+        FreeRtos::delay_ms(10);
     }
 }
 
@@ -40,6 +46,7 @@ enum Screen {
     Device,
     Files,
     Time { selected: usize },
+    Audio { selected: usize },
     Recorder { selected: usize },
     Recording,
     RecorderMessage,
@@ -50,6 +57,11 @@ struct RecordingItem {
     name: String,
     path: String,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiEvent {
+    ClockTick,
 }
 
 fn run_display() -> Result<()> {
@@ -69,10 +81,13 @@ fn run_display() -> Result<()> {
         .ok();
     let mut time = Channel9Time::new();
     let mut config = load_config(&board);
+    apply_audio_config(&mut board, &config);
     let mut scan_results = Vec::new();
     let mut recordings = load_recordings(&board);
     let mut password_input = String::new();
     let mut recorder_message = heapless::String::<64>::new();
+    let (ui_events_tx, ui_events_rx) = sync_channel::<UiEvent>(4);
+    let _ui_scheduler_task = spawn_ui_scheduler(ui_events_tx)?;
     if let Some(wifi) = wifi.as_mut() {
         if let Err(err) = wifi.connect_first_saved(&config.wifi) {
             log::warn!("wifi auto connect failed: {err:?}");
@@ -88,6 +103,8 @@ fn run_display() -> Result<()> {
         }
     }
     let mut screen = Screen::Home;
+    let mut paused_radios = PausedRadios::default();
+    let mut rendered_clock = format_clock(config.time.timezone_offset_minutes);
     render_screen(
         &mut board,
         wifi.as_ref(),
@@ -114,6 +131,14 @@ fn run_display() -> Result<()> {
                 if let Err(stop_err) = board.stop_voice_recording() {
                     log::warn!("voice note stop failed after record error: {stop_err:?}");
                 }
+                resume_radios_after_recording(
+                    wifi.as_mut(),
+                    ble.as_ref(),
+                    &config,
+                    &paused_radios,
+                    &mut time,
+                );
+                paused_radios = PausedRadios::default();
                 recordings = load_recordings(&board);
                 screen = Screen::RecorderMessage;
                 render_screen(
@@ -154,6 +179,14 @@ fn run_display() -> Result<()> {
                             log::warn!("voice note stop failed: {err:?}");
                         }
                     }
+                    resume_radios_after_recording(
+                        wifi.as_mut(),
+                        ble.as_ref(),
+                        &config,
+                        &paused_radios,
+                        &mut time,
+                    );
+                    paused_radios = PausedRadios::default();
                     recordings = load_recordings(&board);
                     screen = Screen::RecorderMessage;
                     render_screen(
@@ -169,7 +202,7 @@ fn run_display() -> Result<()> {
                         screen,
                     )?;
                 }
-                Ets::delay_ms(10);
+                FreeRtos::delay_ms(10);
                 continue;
             }
 
@@ -185,6 +218,7 @@ fn run_display() -> Result<()> {
                 input,
             );
             if next == Screen::Recording {
+                paused_radios = pause_radios_for_recording(wifi.as_mut(), ble.as_ref());
                 recorder_message.clear();
                 match board.start_voice_recording() {
                     Ok(path) => {
@@ -196,6 +230,14 @@ fn run_display() -> Result<()> {
                             format_args!("Record failed: {err:?}"),
                         );
                         log::warn!("voice note start failed: {err:?}");
+                        resume_radios_after_recording(
+                            wifi.as_mut(),
+                            ble.as_ref(),
+                            &config,
+                            &paused_radios,
+                            &mut time,
+                        );
+                        paused_radios = PausedRadios::default();
                         next = Screen::RecorderMessage;
                     }
                 }
@@ -213,8 +255,24 @@ fn run_display() -> Result<()> {
                 recorder_message.as_str(),
                 screen,
             )?;
+            rendered_clock = format_clock(config.time.timezone_offset_minutes);
         }
-        Ets::delay_ms(10);
+
+        drain_ui_events(
+            &ui_events_rx,
+            &mut board,
+            wifi.as_ref(),
+            ble.as_ref(),
+            &mut time,
+            &config,
+            &scan_results,
+            &recordings,
+            &password_input,
+            recorder_message.as_str(),
+            screen,
+            &mut rendered_clock,
+        )?;
+        FreeRtos::delay_ms(10);
     }
 }
 
@@ -248,7 +306,8 @@ fn reduce_screen(
             2 => Screen::Device,
             3 => Screen::Files,
             4 => Screen::Time { selected: 0 },
-            5 => Screen::Recorder { selected: 0 },
+            5 => Screen::Audio { selected: 0 },
+            6 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
         (Screen::Wifi { .. }, InputEvent::Back) => Screen::Config { selected: 0 },
@@ -428,7 +487,30 @@ fn reduce_screen(
             }
             Screen::Time { selected }
         }
-        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 5 },
+        (Screen::Audio { .. }, InputEvent::Back) => {
+            save_config(board, config);
+            Screen::Config { selected: 5 }
+        }
+        (Screen::Audio { selected }, InputEvent::Up) => Screen::Audio {
+            selected: selected.saturating_sub(1),
+        },
+        (Screen::Audio { selected }, InputEvent::Down) => Screen::Audio {
+            selected: (selected + 1).min(AUDIO_ITEMS.len() - 1),
+        },
+        (Screen::Audio { selected: 0 }, InputEvent::Left) => {
+            adjust_speaker_volume(board, config, -5);
+            Screen::Audio { selected: 0 }
+        }
+        (Screen::Audio { selected: 0 }, InputEvent::Right | InputEvent::Select) => {
+            adjust_speaker_volume(board, config, 5);
+            Screen::Audio { selected: 0 }
+        }
+        (Screen::Audio { selected: 1 }, InputEvent::Select) => {
+            save_config(board, config);
+            Screen::Config { selected: 5 }
+        }
+        (Screen::Audio { selected }, _) => Screen::Audio { selected },
+        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 6 },
         (Screen::Recorder { selected }, InputEvent::Up | InputEvent::Left) => Screen::Recorder {
             selected: selected.saturating_sub(1),
         },
@@ -467,7 +549,9 @@ fn reduce_screen(
     }
 }
 
-const CONFIG_ITEMS: &[&str] = &["WiFi", "Storage", "Device", "Files", "Time", "Recorder"];
+const CONFIG_ITEMS: &[&str] = &[
+    "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Recorder",
+];
 const WIFI_ITEMS: &[&str] = &[
     "Auto Connect",
     "Status",
@@ -477,6 +561,7 @@ const WIFI_ITEMS: &[&str] = &[
 ];
 const STORAGE_ITEMS: &[&str] = &["Prefer SD", "Mount Path", "Files", "Back"];
 const TIME_ITEMS: &[&str] = &["Auto Sync", "SNTP Server", "UTC Offset", "Sync Now", "Back"];
+const AUDIO_ITEMS: &[&str] = &["Volume", "Back"];
 const SNTP_SERVERS: &[&str] = &[
     "ntp.tuna.tsinghua.edu.cn",
     "time.pool.aliyun.com",
@@ -837,6 +922,31 @@ fn render_screen(
                 status_bar,
             )
         }
+        Screen::Audio { selected } => {
+            let volume = percent_label(config.audio.speaker_volume_percent);
+            let items = [
+                SettingItem {
+                    label: AUDIO_ITEMS[0],
+                    value: volume.as_str(),
+                    selected: selected == 0,
+                    enabled: board.audio_status().codec_present,
+                },
+                SettingItem {
+                    label: AUDIO_ITEMS[1],
+                    value: "",
+                    selected: selected == 1,
+                    enabled: true,
+                },
+            ];
+            channel9_ui::draw_settings_screen(
+                board.display_mut(),
+                "AUDIO",
+                "Speaker output",
+                &items,
+                "LEFT/RIGHT: Volume  ESC: Back",
+                status_bar,
+            )
+        }
         Screen::Recorder { selected } => {
             let recording_rows: Vec<(String, heapless::String<16>)> = recordings
                 .iter()
@@ -996,10 +1106,16 @@ fn audio_status_label(status: AudioStatus) -> heapless::String<24> {
         let _ = core::fmt::write(
             &mut value,
             format_args!(
-                "{} S{} M{}",
+                "{} S{} M{} A{} {}%",
                 status.codec_name,
                 if status.speaker_ready { "Y" } else { "N" },
-                if status.microphone_ready { "Y" } else { "N" }
+                if status.microphone_ready { "Y" } else { "N" },
+                if status.microphone_alc_enabled {
+                    "Y"
+                } else {
+                    "N"
+                },
+                status.speaker_volume_percent
             ),
         );
     } else {
@@ -1061,6 +1177,12 @@ fn timezone_offset_label(offset_minutes: i32) -> heapless::String<8> {
     value
 }
 
+fn percent_label(percent: u8) -> heapless::String<8> {
+    let mut value = heapless::String::<8>::new();
+    let _ = core::fmt::write(&mut value, format_args!("{}%", percent.min(100)));
+    value
+}
+
 fn next_sntp_server(current: &str) -> String {
     let next = SNTP_SERVERS
         .iter()
@@ -1102,6 +1224,69 @@ fn status_bar(
     }
 }
 
+fn spawn_ui_scheduler(events: SyncSender<UiEvent>) -> Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("channel9-ui-scheduler".to_owned())
+        .stack_size(UI_SCHEDULER_STACK_BYTES)
+        .spawn(move || {
+            loop {
+                thread::sleep(UI_CLOCK_TICK_INTERVAL);
+                match events.try_send(UiEvent::ClockTick) {
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => break,
+                }
+            }
+        })
+        .map_err(|err| anyhow::anyhow!("failed to spawn ui scheduler task: {err:?}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_ui_events(
+    events: &Receiver<UiEvent>,
+    board: &mut CardputerAdv,
+    wifi: Option<&Channel9Wifi>,
+    ble: Option<&Channel9Ble>,
+    time: &mut Channel9Time,
+    config: &AppConfig,
+    scan_results: &[WifiNetwork],
+    recordings: &[RecordingItem],
+    password_input: &str,
+    recorder_message: &str,
+    screen: Screen,
+    rendered_clock: &mut heapless::String<6>,
+) -> Result<()> {
+    loop {
+        match events.try_recv() {
+            Ok(UiEvent::ClockTick) => {
+                if screen == Screen::Recording {
+                    continue;
+                }
+
+                let current_clock = format_clock(config.time.timezone_offset_minutes);
+                if current_clock == *rendered_clock {
+                    continue;
+                }
+
+                render_screen(
+                    board,
+                    wifi,
+                    ble,
+                    time,
+                    config,
+                    scan_results,
+                    recordings,
+                    password_input,
+                    recorder_message,
+                    screen,
+                )?;
+                *rendered_clock = current_clock;
+            }
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
 fn visible_setting_items<'a>(items: &[SettingItem<'a>], selected: usize) -> Vec<SettingItem<'a>> {
     let start = selected.saturating_sub(3);
     items
@@ -1135,6 +1320,111 @@ fn apply_storage_setting(board: &CardputerAdv, config: &mut AppConfig, selected:
         config.storage.prefer_sdcard = !config.storage.prefer_sdcard;
         save_config(board, config);
     }
+}
+
+fn apply_audio_config(board: &mut CardputerAdv, config: &AppConfig) {
+    if let Err(err) = board.set_speaker_volume_percent(config.audio.speaker_volume_percent) {
+        log::warn!("speaker volume apply failed: {err:?}");
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct PausedRadios {
+    wifi_was_connected: bool,
+    wifi_ssid: Option<String>,
+    ble_was_advertising: bool,
+}
+
+fn pause_radios_for_recording(
+    wifi: Option<&mut Channel9Wifi>,
+    ble: Option<&Channel9Ble>,
+) -> PausedRadios {
+    let mut paused = PausedRadios {
+        wifi_was_connected: wifi
+            .as_ref()
+            .map(|wifi| wifi.status() == WifiStatus::Connected)
+            .unwrap_or(false),
+        wifi_ssid: wifi
+            .as_ref()
+            .and_then(|wifi| wifi.last_ssid().map(str::to_owned)),
+        ble_was_advertising: ble
+            .as_ref()
+            .map(|ble| ble.status() == BleStatus::Advertising)
+            .unwrap_or(false),
+    };
+
+    if let Some(wifi) = wifi {
+        if let Err(err) = wifi.stop() {
+            log::warn!("wifi stop before recording failed: {err:?}");
+            paused.wifi_was_connected = false;
+        }
+    }
+
+    if let Some(ble) = ble {
+        if let Err(err) = ble.stop_advertising() {
+            log::warn!("ble pause before recording failed: {err:?}");
+            paused.ble_was_advertising = false;
+        }
+    }
+
+    paused
+}
+
+fn resume_radios_after_recording(
+    wifi: Option<&mut Channel9Wifi>,
+    ble: Option<&Channel9Ble>,
+    config: &AppConfig,
+    paused: &PausedRadios,
+    time: &mut Channel9Time,
+) {
+    if let Some(wifi) = wifi.filter(|_| paused.wifi_was_connected) {
+        match reconnect_paused_wifi(wifi, config, paused.wifi_ssid.as_deref()) {
+            Ok(Some(_)) => {
+                if let Err(err) = time.sync_now(&config.time) {
+                    log::warn!("sntp sync after wifi resume failed: {err:?}");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => log::warn!("wifi resume after recording failed: {err:?}"),
+        }
+    }
+
+    if let Some(ble) = ble.filter(|_| paused.ble_was_advertising) {
+        if let Err(err) = ble.start_advertising() {
+            log::warn!("ble resume after recording failed: {err:?}");
+        }
+    }
+}
+
+fn reconnect_paused_wifi(
+    wifi: &mut Channel9Wifi,
+    config: &AppConfig,
+    paused_ssid: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(ssid) = paused_ssid {
+        if let Some(credential) = config
+            .wifi
+            .credentials
+            .iter()
+            .find(|item| item.ssid == ssid)
+        {
+            wifi.connect(credential)?;
+            return Ok(Some(credential.ssid.clone()));
+        }
+    }
+
+    wifi.connect_first_saved(&config.wifi)
+}
+
+fn adjust_speaker_volume(board: &mut CardputerAdv, config: &mut AppConfig, delta: i8) {
+    let current = config.audio.speaker_volume_percent.min(100) as i16;
+    let next = (current + delta as i16).clamp(0, 100) as u8;
+    if next == config.audio.speaker_volume_percent {
+        return;
+    }
+
+    config.audio.speaker_volume_percent = next;
+    apply_audio_config(board, config);
 }
 
 fn upsert_wifi_credential(config: &mut AppConfig, credential: WifiCredential) {
