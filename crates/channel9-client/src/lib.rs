@@ -13,7 +13,6 @@ pub struct Channel9HttpClient {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CreateDeviceCodeRequest<'a> {
-    workspace_id: &'a str,
     device_id: &'a str,
     interfaces: &'a [String],
 }
@@ -69,14 +68,8 @@ impl Channel9HttpClient {
         }
     }
 
-    pub fn create_device_code(
-        &self,
-        workspace_id: &str,
-        device_id: &str,
-        interfaces: &[String],
-    ) -> Result<DeviceCode> {
+    pub fn create_device_code(&self, device_id: &str, interfaces: &[String]) -> Result<DeviceCode> {
         let request = CreateDeviceCodeRequest {
-            workspace_id,
             device_id,
             interfaces,
         };

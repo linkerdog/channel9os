@@ -58,7 +58,6 @@ enum Screen {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Channel9InputField {
-    Workspace,
     Device,
 }
 
@@ -341,9 +340,7 @@ fn reduce_screen(
             5 => Screen::Audio { selected: 0 },
             6 => {
                 ensure_channel9_device_code(board, wifi, config, channel9_login);
-                Screen::Channel9 {
-                    selected: channel9_initial_selected(config),
-                }
+                Screen::Channel9 { selected: 0 }
             }
             7 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
@@ -572,23 +569,16 @@ fn reduce_screen(
                 }
             } else {
                 match selected {
-                    0 | 3 => poll_channel9_device_token(board, wifi, config, channel9_login),
+                    0 | 2 => poll_channel9_device_token(board, wifi, config, channel9_login),
                     1 => {
-                        channel9_input.clear();
-                        channel9_input.push_str(config.channel9.workspace_id.as_str());
-                        return Screen::Channel9Input {
-                            field: Channel9InputField::Workspace,
-                        };
-                    }
-                    2 => {
                         channel9_input.clear();
                         channel9_input.push_str(config.channel9.device_id.as_str());
                         return Screen::Channel9Input {
                             field: Channel9InputField::Device,
                         };
                     }
-                    4 => create_channel9_device_code(board, wifi, config, channel9_login),
-                    5 => return Screen::Config { selected: 6 },
+                    3 => create_channel9_device_code(board, wifi, config, channel9_login),
+                    4 => return Screen::Config { selected: 6 },
                     _ => {}
                 }
             }
@@ -607,9 +597,6 @@ fn reduce_screen(
         }
         (Screen::Channel9Input { field }, InputEvent::Select) => {
             match field {
-                Channel9InputField::Workspace => {
-                    config.channel9.workspace_id = channel9_input.trim().to_owned();
-                }
                 Channel9InputField::Device => {
                     config.channel9.device_id = channel9_input.trim().to_owned();
                 }
@@ -673,14 +660,7 @@ const WIFI_ITEMS: &[&str] = &[
 const STORAGE_ITEMS: &[&str] = &["Prefer SD", "Mount Path", "Files", "Back"];
 const TIME_ITEMS: &[&str] = &["Auto Sync", "SNTP Server", "UTC Offset", "Sync Now", "Back"];
 const AUDIO_ITEMS: &[&str] = &["Volume", "Back"];
-const CHANNEL9_LOGIN_ITEMS: &[&str] = &[
-    "User Code",
-    "Workspace",
-    "Device",
-    "Poll",
-    "Refresh",
-    "Back",
-];
+const CHANNEL9_LOGIN_ITEMS: &[&str] = &["User Code", "Device", "Poll", "Refresh", "Back"];
 const CHANNEL9_STATUS_ITEMS: &[&str] = &[
     "Status",
     "Workspace",
@@ -1145,33 +1125,33 @@ fn render_screen(
                         },
                         SettingItem {
                             label: CHANNEL9_LOGIN_ITEMS[1],
-                            value: workspace.as_str(),
+                            value: device.as_str(),
                             selected: selected == 1,
                             enabled: true,
                         },
                         SettingItem {
                             label: CHANNEL9_LOGIN_ITEMS[2],
-                            value: device.as_str(),
-                            selected: selected == 2,
-                            enabled: true,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[3],
                             value: "check",
-                            selected: selected == 3,
+                            selected: selected == 2,
                             enabled: channel9_login.active_code.is_some(),
                         },
                         SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[4],
+                            label: CHANNEL9_LOGIN_ITEMS[3],
                             value: "new",
-                            selected: selected == 4,
+                            selected: selected == 3,
                             enabled: channel9_login_ready(config, wifi),
                         },
                         SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[5],
+                            label: CHANNEL9_LOGIN_ITEMS[4],
                             value: "",
-                            selected: selected == 5,
+                            selected: selected == 4,
                             enabled: true,
+                        },
+                        SettingItem {
+                            label: "",
+                            value: "",
+                            selected: false,
+                            enabled: false,
                         },
                         SettingItem {
                             label: "",
@@ -1200,7 +1180,6 @@ fn render_screen(
         }
         Screen::Channel9Input { field } => {
             let title = match field {
-                Channel9InputField::Workspace => "WORKSPACE",
                 Channel9InputField::Device => "DEVICE",
             };
             let input_value = truncate_runtime_label(channel9_input);
@@ -1618,7 +1597,6 @@ fn create_channel9_device_code(
 
     let client = Channel9HttpClient::new(CHANNEL9_API_BASE_URL);
     match client.create_device_code(
-        config.channel9.workspace_id.as_str(),
         config.channel9.device_id.as_str(),
         &config.channel9.interfaces,
     ) {
@@ -1698,9 +1676,6 @@ fn channel9_login_blocked_reason(
     config: &AppConfig,
     wifi: Option<&Channel9Wifi>,
 ) -> Option<&'static str> {
-    if config.channel9.workspace_id.trim().is_empty() {
-        return Some("Set Workspace first");
-    }
     if config.channel9.device_id.trim().is_empty() {
         return Some("Set Device first");
     }
@@ -1711,14 +1686,6 @@ fn channel9_login_blocked_reason(
         return Some("WiFi offline");
     }
     None
-}
-
-fn channel9_initial_selected(config: &AppConfig) -> usize {
-    if channel9_logged_in(config) || !config.channel9.workspace_id.trim().is_empty() {
-        0
-    } else {
-        1
-    }
 }
 
 fn channel9_logged_in(config: &AppConfig) -> bool {
