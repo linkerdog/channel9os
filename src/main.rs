@@ -338,10 +338,7 @@ fn reduce_screen(
             3 => Screen::Files,
             4 => Screen::Time { selected: 0 },
             5 => Screen::Audio { selected: 0 },
-            6 => {
-                ensure_channel9_device_code(board, wifi, config, channel9_login);
-                Screen::Channel9 { selected: 0 }
-            }
+            6 => Screen::Channel9 { selected: 0 },
             7 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
@@ -561,7 +558,6 @@ fn reduce_screen(
                         channel9_login.active_code = None;
                         channel9_login.message = "Token cleared".to_owned();
                         save_config(board, config);
-                        ensure_channel9_device_code(board, wifi, config, channel9_login);
                         return Screen::Channel9 { selected: 0 };
                     }
                     6 => return Screen::Config { selected: 6 },
@@ -604,8 +600,7 @@ fn reduce_screen(
             channel9_input.clear();
             save_config(board, config);
             channel9_login.active_code = None;
-            channel9_login.message.clear();
-            ensure_channel9_device_code(board, wifi, config, channel9_login);
+            channel9_login.message = "Press Refresh".to_owned();
             Screen::Channel9 { selected: 0 }
         }
         (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 7 },
@@ -1614,18 +1609,6 @@ fn create_channel9_device_code(
     }
 }
 
-fn ensure_channel9_device_code(
-    board: &CardputerAdv,
-    wifi: Option<&mut Channel9Wifi>,
-    config: &mut AppConfig,
-    login: &mut Channel9LoginState,
-) {
-    if channel9_logged_in(config) || login.active_code.is_some() {
-        return;
-    }
-    create_channel9_device_code(board, wifi, config, login);
-}
-
 fn poll_channel9_device_token(
     board: &CardputerAdv,
     wifi: Option<&mut Channel9Wifi>,
@@ -1711,7 +1694,7 @@ fn channel9_user_code_label(
     } else if let Some(reason) = channel9_login_blocked_reason(config, wifi) {
         let _ = label.push_str(reason);
     } else {
-        let _ = label.push_str("creating");
+        let _ = label.push_str("Press Refresh");
     }
     label
 }
