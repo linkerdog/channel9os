@@ -338,7 +338,13 @@ fn reduce_screen(
             3 => Screen::Files,
             4 => Screen::Time { selected: 0 },
             5 => Screen::Audio { selected: 0 },
-            6 => Screen::Channel9 { selected: 0 },
+            6 => {
+                ensure_channel9_device_id(board, config);
+                if !channel9_logged_in(config) && channel9_login.active_code.is_none() {
+                    create_channel9_device_code(board, wifi, config, channel9_login);
+                }
+                Screen::Channel9 { selected: 0 }
+            }
             7 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
@@ -1613,6 +1619,17 @@ fn create_channel9_device_code(
             login.message = channel9_error_label("Create failed", &err);
         }
     }
+}
+
+fn ensure_channel9_device_id(board: &CardputerAdv, config: &mut AppConfig) {
+    let current = config.channel9.device_id.trim();
+    if !current.is_empty() && current != "cardputer-adv" {
+        return;
+    }
+
+    let random = unsafe { esp_idf_svc::sys::esp_random() };
+    config.channel9.device_id = format!("cardputer_{random:08x}");
+    save_config(board, config);
 }
 
 fn poll_channel9_device_token(
