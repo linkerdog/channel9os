@@ -565,7 +565,11 @@ fn reduce_screen(
                 }
             } else {
                 match selected {
-                    0 | 2 => poll_channel9_device_token(board, wifi, config, channel9_login),
+                    0 if channel9_login.active_code.is_some() => {
+                        poll_channel9_device_token(board, wifi, config, channel9_login)
+                    }
+                    0 => create_channel9_device_code(board, wifi, config, channel9_login),
+                    2 => poll_channel9_device_token(board, wifi, config, channel9_login),
                     1 => {
                         channel9_input.clear();
                         channel9_input.push_str(config.channel9.device_id.as_str());
@@ -1116,7 +1120,8 @@ fn render_screen(
                             label: CHANNEL9_LOGIN_ITEMS[0],
                             value: code_value.as_str(),
                             selected: selected == 0,
-                            enabled: channel9_login.active_code.is_some(),
+                            enabled: channel9_login_ready(config, wifi)
+                                || channel9_login.active_code.is_some(),
                         },
                         SettingItem {
                             label: CHANNEL9_LOGIN_ITEMS[1],
@@ -1596,7 +1601,8 @@ fn create_channel9_device_code(
         &config.channel9.interfaces,
     ) {
         Ok(code) => {
-            login.message = format!("Code {}", code.user_code);
+            let user_code = channel9_format_user_code(code.user_code.as_str());
+            login.message = format!("Code {user_code}");
             login.active_code = Some(code);
             config.channel9.access_token = None;
             config.channel9.token_expires_at = None;
@@ -1604,7 +1610,7 @@ fn create_channel9_device_code(
         }
         Err(err) => {
             log::warn!("channel9 device code create failed: {err:?}");
-            login.message = "Login start failed".to_owned();
+            login.message = channel9_error_label("Create failed", &err);
         }
     }
 }
@@ -1633,7 +1639,8 @@ fn poll_channel9_device_token(
     let client = Channel9HttpClient::new(CHANNEL9_API_BASE_URL);
     match client.poll_device_token(code.device_code.as_str()) {
         Ok(PollToken::Pending) => {
-            login.message = format!("Pending {}", code.user_code);
+            let user_code = channel9_format_user_code(code.user_code.as_str());
+            login.message = format!("Pending {user_code}");
         }
         Ok(PollToken::Approved(token)) => {
             config.channel9.access_token = Some(token.access_token);
@@ -1646,7 +1653,7 @@ fn poll_channel9_device_token(
         }
         Err(err) => {
             log::warn!("channel9 token poll failed: {err:?}");
-            login.message = "Poll failed".to_owned();
+            login.message = channel9_error_label("Poll failed", &err);
         }
     }
 }
@@ -1690,13 +1697,41 @@ fn channel9_user_code_label(
 ) -> heapless::String<24> {
     let mut label = heapless::String::new();
     if let Some(code) = login.active_code.as_ref() {
-        let _ = label.push_str(code.user_code.as_str());
+        let user_code = channel9_format_user_code(code.user_code.as_str());
+        let _ = label.push_str(user_code.as_str());
     } else if let Some(reason) = channel9_login_blocked_reason(config, wifi) {
         let _ = label.push_str(reason);
     } else {
-        let _ = label.push_str("Press Refresh");
+        let _ = label.push_str("Enter Create");
     }
     label
+}
+
+fn channel9_format_user_code(value: &str) -> heapless::String<16> {
+    let mut output = heapless::String::<16>::new();
+    let normalized = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase());
+    for (index, ch) in normalized.take(12).enumerate() {
+        if index == 4 {
+            let _ = output.push('-');
+        }
+        let _ = output.push(ch);
+    }
+    output
+}
+
+fn channel9_error_label(prefix: &str, error: &anyhow::Error) -> String {
+    let detail = error.to_string();
+    if detail.is_empty() {
+        return prefix.to_owned();
+    }
+    let mut message = String::with_capacity(prefix.len() + 2 + 32);
+    message.push_str(prefix);
+    message.push_str(": ");
+    message.extend(detail.chars().take(32));
+    message
 }
 
 fn channel9_epoch_label(value: Option<i64>) -> heapless::String<24> {
