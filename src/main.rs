@@ -232,6 +232,7 @@ fn run_display() -> Result<()> {
             let mut next = reduce_screen(
                 &mut board,
                 wifi.as_mut(),
+                ble.as_ref(),
                 &mut time,
                 &mut config,
                 &mut scan_results,
@@ -308,6 +309,7 @@ fn run_display() -> Result<()> {
 fn reduce_screen(
     board: &mut CardputerAdv,
     wifi: Option<&mut Channel9Wifi>,
+    ble: Option<&Channel9Ble>,
     time: &mut Channel9Time,
     config: &mut AppConfig,
     scan_results: &mut Vec<WifiNetwork>,
@@ -341,7 +343,7 @@ fn reduce_screen(
             6 => {
                 ensure_channel9_device_id(board, config);
                 if !channel9_logged_in(config) && channel9_login.active_code.is_none() {
-                    create_channel9_device_code(board, wifi, config, channel9_login);
+                    create_channel9_device_code(board, wifi, ble, config, channel9_login);
                 }
                 Screen::Channel9 { selected: 0 }
             }
@@ -572,10 +574,10 @@ fn reduce_screen(
             } else {
                 match selected {
                     0 if channel9_login.active_code.is_some() => {
-                        poll_channel9_device_token(board, wifi, config, channel9_login)
+                        poll_channel9_device_token(board, wifi, ble, config, channel9_login)
                     }
-                    0 => create_channel9_device_code(board, wifi, config, channel9_login),
-                    2 => poll_channel9_device_token(board, wifi, config, channel9_login),
+                    0 => create_channel9_device_code(board, wifi, ble, config, channel9_login),
+                    2 => poll_channel9_device_token(board, wifi, ble, config, channel9_login),
                     1 => {
                         channel9_input.clear();
                         channel9_input.push_str(config.channel9.device_id.as_str());
@@ -583,7 +585,7 @@ fn reduce_screen(
                             field: Channel9InputField::Device,
                         };
                     }
-                    3 => create_channel9_device_code(board, wifi, config, channel9_login),
+                    3 => create_channel9_device_code(board, wifi, ble, config, channel9_login),
                     4 => return Screen::Config { selected: 6 },
                     _ => {}
                 }
@@ -1592,6 +1594,7 @@ fn apply_audio_config(board: &mut CardputerAdv, config: &AppConfig) {
 fn create_channel9_device_code(
     board: &CardputerAdv,
     wifi: Option<&mut Channel9Wifi>,
+    ble: Option<&Channel9Ble>,
     config: &mut AppConfig,
     login: &mut Channel9LoginState,
 ) {
@@ -1601,6 +1604,7 @@ fn create_channel9_device_code(
         return;
     }
 
+    let resume_ble = pause_ble_for_channel9(ble);
     let client = Channel9HttpClient::new(CHANNEL9_API_BASE_URL);
     match client.create_device_code(
         config.channel9.device_id.as_str(),
@@ -1619,6 +1623,7 @@ fn create_channel9_device_code(
             login.message = channel9_error_label("Create failed", &err);
         }
     }
+    resume_ble_after_channel9(ble, resume_ble);
 }
 
 fn ensure_channel9_device_id(board: &CardputerAdv, config: &mut AppConfig) {
@@ -1635,6 +1640,7 @@ fn ensure_channel9_device_id(board: &CardputerAdv, config: &mut AppConfig) {
 fn poll_channel9_device_token(
     board: &CardputerAdv,
     wifi: Option<&mut Channel9Wifi>,
+    ble: Option<&Channel9Ble>,
     config: &mut AppConfig,
     login: &mut Channel9LoginState,
 ) {
@@ -1653,6 +1659,7 @@ fn poll_channel9_device_token(
         return;
     };
 
+    let resume_ble = pause_ble_for_channel9(ble);
     let client = Channel9HttpClient::new(CHANNEL9_API_BASE_URL);
     match client.poll_device_token(code.device_code.as_str()) {
         Ok(PollToken::Pending) => {
@@ -1673,6 +1680,7 @@ fn poll_channel9_device_token(
             login.message = channel9_error_label("Poll failed", &err);
         }
     }
+    resume_ble_after_channel9(ble, resume_ble);
 }
 
 fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
@@ -1693,6 +1701,32 @@ fn channel9_login_blocked_reason(
         return Some("WiFi offline");
     }
     None
+}
+
+fn pause_ble_for_channel9(ble: Option<&Channel9Ble>) -> bool {
+    let Some(ble) = ble else {
+        return false;
+    };
+    if ble.status() != BleStatus::Advertising {
+        return false;
+    }
+    if let Err(err) = ble.stop_advertising() {
+        log::warn!("ble pause before channel9 request failed: {err:?}");
+        return false;
+    }
+    FreeRtos::delay_ms(100);
+    true
+}
+
+fn resume_ble_after_channel9(ble: Option<&Channel9Ble>, should_resume: bool) {
+    if !should_resume {
+        return;
+    }
+    if let Some(ble) = ble {
+        if let Err(err) = ble.start_advertising() {
+            log::warn!("ble resume after channel9 request failed: {err:?}");
+        }
+    }
 }
 
 fn channel9_logged_in(config: &AppConfig) -> bool {
