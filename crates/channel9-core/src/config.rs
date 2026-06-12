@@ -52,6 +52,8 @@ pub struct Channel9Config {
     pub api_base_url: String,
     pub workspace_id: String,
     pub device_id: String,
+    #[serde(default = "default_channel9_device_description")]
+    pub description: String,
     pub interfaces: Vec<String>,
     pub access_token: Option<String>,
     pub token_expires_at: Option<i64>,
@@ -81,6 +83,7 @@ impl Default for Channel9Config {
             api_base_url: default_channel9_api_base_url(),
             workspace_id: String::new(),
             device_id: "cardputer-adv".to_owned(),
+            description: default_channel9_device_description(),
             interfaces: vec!["display".to_owned(), "speaker".to_owned()],
             access_token: None,
             token_expires_at: None,
@@ -90,6 +93,10 @@ impl Default for Channel9Config {
 
 fn default_channel9_api_base_url() -> String {
     "https://app.linkerdog.work".to_owned()
+}
+
+fn default_channel9_device_description() -> String {
+    "Cardputer-Adv Channel9 device".to_owned()
 }
 
 impl Default for AppConfig {

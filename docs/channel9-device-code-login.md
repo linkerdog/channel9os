@@ -21,6 +21,7 @@ Request:
 ```json
 {
   "device_id": "cardputer-adv",
+  "description": "Cardputer-Adv Channel9 device",
   "interfaces": ["display", "speaker"]
 }
 ```
@@ -28,10 +29,12 @@ Request:
 Important rules:
 
 - The request does not include `workspace_id`.
+- The request includes a non-privileged human-readable `description` when available.
 - The pending device code is not workspace-bound.
 - The firmware displays `user_code` after the response succeeds.
 - The human-visible `user_code` uses `-` as its separator, for example `ABCD-1234`.
 - The firmware may also store `device_code` in RAM while the login flow is active.
+- The firmware must stop polling and show an expired state after `activation_expires_at`.
 
 Response:
 

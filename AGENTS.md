@@ -17,9 +17,11 @@ The current board implementation is Cardputer-Adv.
 
 Channel9 device-code login follows the SaaS spec in `docs/channel9-device-code-login.md`.
 
-- Firmware creates a device code with `device_id` and `interfaces` only.
+- Firmware creates a device code with `device_id`, `interfaces`, and optional `description`.
+- Firmware may include `description` in the device-code create request. Treat it as non-privileged human metadata.
 - Firmware may replace a pending, unapproved in-memory `device_code`.
 - After creating a device code, firmware polls the token endpoint every returned `interval_seconds` until approved or replaced.
+- Firmware must stop polling an unapproved code after its `activation_expires_at`.
 - Once a device token is stored, firmware must not create another device code unless login is cleared.
 - Firmware must not send `workspace_id` when creating a device code.
 - A pending device code is not workspace-bound.

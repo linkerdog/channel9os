@@ -13,7 +13,7 @@ use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
@@ -1560,6 +1560,7 @@ fn create_channel9_device_code(
     let client = Channel9HttpClient::new(channel9_api_base_url(config));
     match client.create_device_code(
         config.channel9.device_id.as_str(),
+        config.channel9.description.as_str(),
         &config.channel9.interfaces,
     ) {
         Ok(code) => {
@@ -1606,6 +1607,16 @@ fn poll_channel9_device_token(
         return;
     }
 
+    if login.active_code.is_none() {
+        login.message = "Create code first".to_owned();
+        return;
+    }
+    if channel9_active_code_expired(login) {
+        login.active_code = None;
+        login.next_poll_at = None;
+        login.message = "Code expired".to_owned();
+        return;
+    }
     let Some(code) = login.active_code.as_ref() else {
         login.message = "Create code first".to_owned();
         return;
@@ -1662,6 +1673,12 @@ fn maybe_schedule_channel9_auto_poll(config: &AppConfig, login: &mut Channel9Log
     {
         return false;
     }
+    if channel9_active_code_expired(login) {
+        login.active_code = None;
+        login.next_poll_at = None;
+        login.message = "Code expired".to_owned();
+        return false;
+    }
 
     let should_poll = login
         .next_poll_at
@@ -1679,6 +1696,17 @@ fn maybe_schedule_channel9_auto_poll(config: &AppConfig, login: &mut Channel9Log
 fn channel9_poll_interval(code: &DeviceCode) -> Duration {
     let seconds = code.interval_seconds.clamp(1, 60) as u64;
     Duration::from_secs(seconds)
+}
+
+fn channel9_active_code_expired(login: &Channel9LoginState) -> bool {
+    let Some(code) = login.active_code.as_ref() else {
+        return false;
+    };
+    let Ok(elapsed) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let now = elapsed.as_secs() as i64;
+    now >= code.activation_expires_at
 }
 
 fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {

@@ -18,6 +18,8 @@ pub struct Channel9HttpClient {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CreateDeviceCodeRequest<'a> {
     device_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
     interfaces: &'a [String],
 }
 
@@ -72,9 +74,15 @@ impl Channel9HttpClient {
         }
     }
 
-    pub fn create_device_code(&self, device_id: &str, interfaces: &[String]) -> Result<DeviceCode> {
+    pub fn create_device_code(
+        &self,
+        device_id: &str,
+        description: &str,
+        interfaces: &[String],
+    ) -> Result<DeviceCode> {
         let request = CreateDeviceCodeRequest {
             device_id,
+            description: non_empty_description(description),
             interfaces,
         };
         let envelope =
@@ -204,6 +212,15 @@ fn trim_base_url(mut value: String) -> String {
         value.pop();
     }
     value
+}
+
+fn non_empty_description(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn endpoint_host(value: &str) -> Option<&str> {
