@@ -116,6 +116,12 @@ enum Channel9SseUpdate {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Channel9SseDrain {
+    changed: bool,
+    new_messages: usize,
+}
+
 impl Drop for Channel9SseWorker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -393,7 +399,13 @@ fn run_display() -> Result<()> {
             &mut channel9_push,
             &mut channel9_sse_worker,
         );
-        if drain_channel9_sse_updates(&mut channel9_push, &channel9_sse_worker) {
+        let sse_update = drain_channel9_sse_updates(&mut channel9_push, &channel9_sse_worker);
+        if sse_update.new_messages > 0 && screen != Screen::Recording {
+            if let Err(err) = board.play_pager_beep() {
+                log::warn!("channel9 pager beep failed: {err:?}");
+            }
+        }
+        if sse_update.changed {
             render_screen(
                 &mut board,
                 wifi.as_ref(),
@@ -1707,11 +1719,11 @@ fn spawn_channel9_sse_worker(
 fn drain_channel9_sse_updates(
     push: &mut Channel9PushState,
     worker: &Option<Channel9SseWorker>,
-) -> bool {
+) -> Channel9SseDrain {
     let Some(worker) = worker.as_ref() else {
-        return false;
+        return Channel9SseDrain::default();
     };
-    let mut changed = false;
+    let mut drain = Channel9SseDrain::default();
     loop {
         match worker.receiver.try_recv() {
             Ok(Channel9SseUpdate::Connected) => {
@@ -1719,27 +1731,29 @@ fn drain_channel9_sse_updates(
                 if push.message_count == 0 {
                     push.detail = "Listening for pushes".to_owned();
                 }
-                changed = true;
+                drain.changed = true;
             }
             Ok(Channel9SseUpdate::Messages(messages)) => {
                 push.online = true;
                 for message in messages {
+                    drain.new_messages = drain.new_messages.saturating_add(1);
                     push.message_count = push.message_count.saturating_add(1);
                     push.last_cursor = Some(message.cursor.clone());
                     push.suggestion = message.display_text();
                     push.detail = message.detail_text();
                 }
-                changed = true;
+                drain.changed = true;
             }
             Ok(Channel9SseUpdate::Failed(message)) => {
                 push.online = false;
                 push.detail = message;
-                changed = true;
+                drain.changed = true;
             }
-            Err(TryRecvError::Empty) => return changed,
+            Err(TryRecvError::Empty) => return drain,
             Err(TryRecvError::Disconnected) => {
                 push.online = false;
-                return true;
+                drain.changed = true;
+                return drain;
             }
         }
     }

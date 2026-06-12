@@ -123,6 +123,8 @@ approved response.
   last in-memory cursor and updates the home push panel with the latest message.
 - The status bar shows the Channel9 check indicator only after a successful SSE heartbeat or message
   response.
+- A newly received push message may play a short pager-style notification tone. The firmware skips
+  this tone while recording is active.
 
 ## Firmware Endpoint Configuration
 
