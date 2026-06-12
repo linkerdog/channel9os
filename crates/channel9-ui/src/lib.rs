@@ -291,7 +291,7 @@ where
         display,
         "CHANNEL9",
         if view.logged_in {
-            "Connected"
+            "Device linked"
         } else {
             "Device login"
         },
@@ -322,7 +322,7 @@ where
         )?;
         draw_channel9_action_bar(
             display,
-            &[("CLEAR", view.selected == 5), ("BACK", view.selected == 6)],
+            &[("LOGOUT", view.selected == 5), ("BACK", view.selected == 6)],
         )?;
         return Ok(());
     }
