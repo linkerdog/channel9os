@@ -41,15 +41,13 @@ pub struct FileListItem<'a> {
 pub struct HomeView<'a> {
     pub suggestion: &'a str,
     pub detail: &'a str,
-    pub storage_label: &'a str,
-    pub wifi_enabled: bool,
-    pub sd_mounted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusBar {
     pub wifi: StatusWifi,
     pub ble: StatusBle,
+    pub channel9_online: bool,
     pub hour_minute: heapless::String<6>,
 }
 
@@ -174,16 +172,6 @@ where
     draw_text(display, view.suggestion, Point::new(18, 72), PRIMARY)?;
     draw_text(display, view.detail, Point::new(18, 88), MUTED)?;
 
-    let mut status = heapless::String::<48>::new();
-    let _ = core::fmt::write(
-        &mut status,
-        format_args!(
-            "SD:{} WIFI:{}",
-            if view.sd_mounted { "ON" } else { "OFF" },
-            if view.wifi_enabled { "AUTO" } else { "OFF" }
-        ),
-    );
-    draw_text(display, status.as_str(), Point::new(18, 113), MUTED)?;
     draw_selected_button(display, "CONFIG", Point::new(158, 105), Size::new(62, 17))?;
 
     Ok(())
@@ -516,6 +504,7 @@ where
     )?;
     draw_status_wifi_icon(display, Point::new(147, 6), status.wifi)?;
     draw_status_ble_icon(display, Point::new(176, 7), status.ble)?;
+    draw_status_channel9_icon(display, Point::new(128, 8), status.channel9_online)?;
     draw_battery(display, Point::new(199, 8), 72)?;
 
     if !title.is_empty() {
@@ -561,6 +550,7 @@ where
     )?;
     draw_status_wifi_icon(display, Point::new(147, 6), status.wifi)?;
     draw_status_ble_icon(display, Point::new(176, 7), status.ble)?;
+    draw_status_channel9_icon(display, Point::new(128, 8), status.channel9_online)?;
     draw_battery(display, Point::new(199, 8), 72)?;
     draw_text(display, footer, Point::new(12, 128), MUTED)
 }
@@ -795,6 +785,39 @@ where
         .map_err(|err| anyhow::anyhow!("status wifi fail draw failed: {err:?}"))?;
     }
 
+    Ok(())
+}
+
+fn draw_status_channel9_icon<D>(display: &mut D, origin: Point, online: bool) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    let color = if online {
+        WHITE
+    } else {
+        Rgb565::new(8, 24, 18)
+    };
+    Circle::new(Point::new(origin.x, origin.y), 13)
+        .into_styled(PrimitiveStyle::with_stroke(color, 1))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("status channel9 icon draw failed: {err:?}"))?;
+    if online {
+        Line::new(
+            Point::new(origin.x + 3, origin.y + 7),
+            Point::new(origin.x + 6, origin.y + 10),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("status channel9 check draw failed: {err:?}"))?;
+        Line::new(
+            Point::new(origin.x + 6, origin.y + 10),
+            Point::new(origin.x + 12, origin.y + 4),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("status channel9 check draw failed: {err:?}"))?;
+    }
     Ok(())
 }
 

@@ -106,16 +106,23 @@ approved response.
 
 ## Firmware UI Behavior
 
-- If no token is stored, the Channel9 settings screen shows login state and a `Refresh` action.
+- If no token is stored, the Channel9 settings screen shows login state and a `Create` action.
 - Opening the Channel9 settings screen must not implicitly start an HTTPS request.
-- Selecting `Refresh` creates a new device code. A pending, unapproved code may be replaced.
+- Selecting `Create` creates a new device code. A pending, unapproved code may be replaced with
+  `Refresh`.
 - After creating a code, the firmware polls the token endpoint every `interval_seconds` until the
   browser approves the code or the code is replaced.
-- Selecting `Poll` may force an immediate token check for the active device code.
+- Selecting `Check` may force an immediate token check for the active device code.
 - If a token is stored, the settings screen displays login status and metadata, including
   `workspace_id`.
 - If a token is stored, the firmware must not create another device code unless login is cleared.
 - Clearing login removes the token metadata and returns to the device-code login flow.
+- After login, the firmware opens the device events endpoint from a background worker so UI input is
+  not blocked by HTTPS retries.
+- The current backend returns snapshot SSE responses. The firmware reconnects periodically with the
+  last in-memory cursor and updates the home push panel with the latest message.
+- The status bar shows the Channel9 check indicator only after a successful SSE heartbeat or message
+  response.
 
 ## Firmware Endpoint Configuration
 
