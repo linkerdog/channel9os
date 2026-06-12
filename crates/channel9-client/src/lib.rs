@@ -3,7 +3,7 @@ use embedded_svc::http::client::Client as HttpClient;
 use esp_idf_svc::http::client::EspHttpConnection;
 use serde::{Deserialize, Serialize};
 
-const RESPONSE_BUFFER_BYTES: usize = 4096;
+const RESPONSE_BUFFER_BYTES: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,7 +125,7 @@ impl Channel9HttpClient {
         let mut response = request.submit()?;
         let status = response.status();
 
-        let mut buffer = [0_u8; RESPONSE_BUFFER_BYTES];
+        let mut buffer = vec![0_u8; RESPONSE_BUFFER_BYTES];
         let mut body = Vec::new();
         loop {
             let read = response.read(&mut buffer)?;
