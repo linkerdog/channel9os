@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub time: TimeConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub channel9: Channel9Config,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +46,19 @@ pub struct AudioConfig {
     pub speaker_volume_percent: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Channel9Config {
+    #[serde(default = "default_channel9_api_base_url")]
+    pub api_base_url: String,
+    pub workspace_id: String,
+    pub device_id: String,
+    #[serde(default = "default_channel9_device_description")]
+    pub description: String,
+    pub interfaces: Vec<String>,
+    pub access_token: Option<String>,
+    pub token_expires_at: Option<i64>,
+}
+
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
@@ -62,6 +77,28 @@ impl Default for TimeConfig {
     }
 }
 
+impl Default for Channel9Config {
+    fn default() -> Self {
+        Self {
+            api_base_url: default_channel9_api_base_url(),
+            workspace_id: String::new(),
+            device_id: "cardputer-adv".to_owned(),
+            description: default_channel9_device_description(),
+            interfaces: vec!["display".to_owned(), "speaker".to_owned()],
+            access_token: None,
+            token_expires_at: None,
+        }
+    }
+}
+
+fn default_channel9_api_base_url() -> String {
+    "https://app.linkerdog.work".to_owned()
+}
+
+fn default_channel9_device_description() -> String {
+    "Cardputer-Adv Channel9 device".to_owned()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -77,6 +114,7 @@ impl Default for AppConfig {
             },
             time: TimeConfig::default(),
             audio: AudioConfig::default(),
+            channel9: Channel9Config::default(),
         }
     }
 }

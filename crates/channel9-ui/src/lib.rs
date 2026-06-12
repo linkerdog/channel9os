@@ -84,6 +84,19 @@ pub struct SettingItem<'a> {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Channel9View<'a> {
+    pub logged_in: bool,
+    pub selected: usize,
+    pub user_code: &'a str,
+    pub device: &'a str,
+    pub workspace: &'a str,
+    pub expires: &'a str,
+    pub message: &'a str,
+    pub ready: bool,
+    pub has_active_code: bool,
+}
+
 pub fn draw_hello_screen<D>(display: &mut D, storage_path: &str) -> Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -248,6 +261,115 @@ where
     }
 
     Ok(())
+}
+
+pub fn draw_channel9_screen<D>(
+    display: &mut D,
+    view: Channel9View<'_>,
+    status: StatusBar,
+) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    display
+        .clear(BG)
+        .map_err(|err| anyhow::anyhow!("display clear failed: {err:?}"))?;
+
+    let footer = if view.message.is_empty() {
+        if view.logged_in {
+            "ENTER: Clear  ESC: Back"
+        } else if view.has_active_code {
+            "Auto checking approval"
+        } else {
+            "ENTER: Create  ESC: Back"
+        }
+    } else {
+        view.message
+    };
+    draw_shell(
+        display,
+        "CHANNEL9",
+        if view.logged_in {
+            "Connected"
+        } else {
+            "Device login"
+        },
+        footer,
+        status,
+    )?;
+
+    Rectangle::new(Point::new(10, 54), Size::new(220, 49))
+        .into_styled(panel_style(false))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("channel9 panel draw failed: {err:?}"))?;
+
+    if view.logged_in {
+        draw_text(display, "CONNECTED", Point::new(18, 72), OPERATION)?;
+        draw_text(display, "Workspace", Point::new(18, 87), MUTED)?;
+        draw_text(
+            display,
+            truncate_name(view.workspace, 18).as_str(),
+            Point::new(82, 87),
+            PRIMARY,
+        )?;
+        draw_text(display, "Device", Point::new(18, 100), MUTED)?;
+        draw_text(
+            display,
+            truncate_name(view.device, 21).as_str(),
+            Point::new(82, 100),
+            PRIMARY,
+        )?;
+        draw_channel9_action_bar(
+            display,
+            &[("CLEAR", view.selected == 5), ("BACK", view.selected == 6)],
+        )?;
+        return Ok(());
+    }
+
+    if view.has_active_code {
+        draw_centered_big_text(display, view.user_code, 82, OPERATION)?;
+        draw_text(
+            display,
+            "Waiting for browser approval",
+            Point::new(39, 99),
+            MUTED,
+        )?;
+    } else {
+        draw_centered_big_text(
+            display,
+            if view.ready { "READY" } else { "WAIT" },
+            80,
+            if view.ready { OPERATION } else { MUTED },
+        )?;
+        draw_text(
+            display,
+            truncate_name(view.user_code, 30).as_str(),
+            Point::new(24, 99),
+            MUTED,
+        )?;
+    }
+
+    if view.has_active_code {
+        draw_channel9_action_bar(
+            display,
+            &[
+                ("CHECK", view.selected == 0),
+                ("REFRESH", view.selected == 2),
+                ("DEVICE", view.selected == 1),
+                ("BACK", view.selected == 3),
+            ],
+        )
+    } else {
+        draw_channel9_action_bar(
+            display,
+            &[
+                ("CREATE", view.selected == 0),
+                ("DEVICE", view.selected == 1),
+                ("BACK", view.selected == 2),
+            ],
+        )
+    }
 }
 
 pub fn draw_password_screen<D>(
@@ -758,6 +880,7 @@ where
         "Files" => draw_files_icon(display, center, color),
         "Time" => draw_time_icon(display, center, color),
         "Audio" => draw_audio_icon(display, center, color),
+        "Channel9" => draw_channel9_icon(display, center, color),
         "Recorder" => draw_recorder_icon(display, center, color),
         _ => draw_generic_icon(display, center, color),
     }
@@ -985,6 +1108,39 @@ where
     Ok(())
 }
 
+fn draw_channel9_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    Rectangle::new(Point::new(center.x - 19, center.y - 16), Size::new(38, 28))
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("channel9 badge draw failed: {err:?}"))?;
+    Text::new(
+        "C9",
+        Point::new(center.x - 11, center.y + 6),
+        MonoTextStyle::new(&FONT_10X20, color),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("channel9 mark draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 13, center.y + 17),
+        Point::new(center.x + 13, center.y + 17),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("channel9 push line draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 6, center.y + 21),
+        Point::new(center.x + 6, center.y + 21),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("channel9 push line draw failed: {err:?}"))?;
+    Ok(())
+}
+
 fn draw_generic_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -1018,6 +1174,61 @@ where
         Point::new(origin.x + 6, origin.y + 11),
         WHITE,
     )
+}
+
+fn draw_channel9_action_bar<D>(display: &mut D, actions: &[(&str, bool)]) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    let mut x = 14;
+    for (label, selected) in actions.iter().copied() {
+        let width = match label.len() {
+            0..=4 => 38,
+            5..=6 => 46,
+            _ => 54,
+        };
+        let fill = if selected { SELECTED } else { PANEL };
+        let text = if selected { WHITE } else { PRIMARY };
+        let stroke = if selected { OPERATION } else { MUTED };
+        Rectangle::new(Point::new(x, 107), Size::new(width, 16))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(fill)
+                    .stroke_color(stroke)
+                    .stroke_width(1)
+                    .build(),
+            )
+            .draw(display)
+            .map_err(|err| anyhow::anyhow!("channel9 action draw failed: {err:?}"))?;
+        draw_centered_small_text_in(display, label, x, width as i32, 119, text)?;
+        x += width as i32 + 5;
+    }
+    Ok(())
+}
+
+fn draw_centered_big_text<D>(
+    display: &mut D,
+    text: &str,
+    baseline_y: i32,
+    color: Rgb565,
+) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    let visible_chars = text.chars().take(12).count() as i32;
+    let text_width = visible_chars * 10;
+    let x = (SCREEN_WIDTH - text_width) / 2;
+    let label = truncate_name(text, 12);
+    Text::new(
+        label.as_str(),
+        Point::new(x, baseline_y),
+        MonoTextStyle::new(&FONT_10X20, color),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("big text draw failed: {err:?}"))?;
+    Ok(())
 }
 
 fn draw_text<D>(display: &mut D, text: &str, position: Point, color: Rgb565) -> Result<()>

@@ -1,18 +1,19 @@
 use anyhow::Result;
 use channel9_ble::{BleStatus, Channel9Ble};
 use channel9_board::{AudioStatus, CardputerAdv, ImuStatus, InputEvent};
+use channel9_client::{Channel9HttpClient, DeviceCode, PollToken};
 use channel9_core::{AppConfig, WifiCredential};
 use channel9_storage::{ConfigStore, JsonConfigStore, list_directory, littlefs2_probe};
 use channel9_time::{Channel9Time, TimeSyncStatus, format_clock};
 use channel9_ui::{
-    FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
+    Channel9View, FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
 };
 use channel9_wifi::{Channel9Wifi, WifiNetwork, WifiStatus};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
@@ -47,9 +48,16 @@ enum Screen {
     Files,
     Time { selected: usize },
     Audio { selected: usize },
+    Channel9 { selected: usize },
+    Channel9Input { field: Channel9InputField },
     Recorder { selected: usize },
     Recording,
     RecorderMessage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Channel9InputField {
+    Device,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +65,20 @@ struct RecordingItem {
     name: String,
     path: String,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Channel9LoginState {
+    active_code: Option<DeviceCode>,
+    message: String,
+    pending_request: Option<Channel9LoginRequest>,
+    next_poll_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Channel9LoginRequest {
+    Create,
+    Poll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,24 +89,20 @@ enum UiEvent {
 fn run_display() -> Result<()> {
     let peripherals = Peripherals::take()?;
     let (board_peripherals, modem) = CardputerAdv::split(peripherals);
-    let (wifi_modem, ble_modem) = modem.split();
+    let (wifi_modem, _ble_modem) = modem.split();
     let mut board = CardputerAdv::new(board_peripherals)?;
     let mut wifi = Channel9Wifi::new(wifi_modem)
         .inspect_err(|err| log::warn!("wifi init failed: {err:?}"))
         .ok();
-    let ble = Channel9Ble::new(ble_modem)
-        .and_then(|ble| {
-            ble.start_advertising()?;
-            Ok(ble)
-        })
-        .inspect_err(|err| log::warn!("ble init failed: {err:?}"))
-        .ok();
+    let ble: Option<Channel9Ble> = None;
     let mut time = Channel9Time::new();
     let mut config = load_config(&board);
     apply_audio_config(&mut board, &config);
     let mut scan_results = Vec::new();
     let mut recordings = load_recordings(&board);
     let mut password_input = String::new();
+    let mut channel9_input = String::new();
+    let mut channel9_login = Channel9LoginState::default();
     let mut recorder_message = heapless::String::<64>::new();
     let (ui_events_tx, ui_events_rx) = sync_channel::<UiEvent>(4);
     let _ui_scheduler_task = spawn_ui_scheduler(ui_events_tx)?;
@@ -114,6 +132,8 @@ fn run_display() -> Result<()> {
         &scan_results,
         &recordings,
         &password_input,
+        &channel9_input,
+        &channel9_login,
         recorder_message.as_str(),
         screen,
     )?;
@@ -150,6 +170,8 @@ fn run_display() -> Result<()> {
                     &scan_results,
                     &recordings,
                     &password_input,
+                    &channel9_input,
+                    &channel9_login,
                     recorder_message.as_str(),
                     screen,
                 )?;
@@ -198,6 +220,8 @@ fn run_display() -> Result<()> {
                         &scan_results,
                         &recordings,
                         &password_input,
+                        &channel9_input,
+                        &channel9_login,
                         recorder_message.as_str(),
                         screen,
                     )?;
@@ -214,6 +238,8 @@ fn run_display() -> Result<()> {
                 &mut scan_results,
                 &mut recordings,
                 &mut password_input,
+                &mut channel9_input,
+                &mut channel9_login,
                 screen,
                 input,
             );
@@ -252,10 +278,57 @@ fn run_display() -> Result<()> {
                 &scan_results,
                 &recordings,
                 &password_input,
+                &channel9_input,
+                &channel9_login,
                 recorder_message.as_str(),
                 screen,
             )?;
             rendered_clock = format_clock(config.time.timezone_offset_minutes);
+            if process_channel9_login_request(
+                &board,
+                wifi.as_mut(),
+                &mut config,
+                &mut channel9_login,
+            ) {
+                render_screen(
+                    &mut board,
+                    wifi.as_ref(),
+                    ble.as_ref(),
+                    &mut time,
+                    &config,
+                    &scan_results,
+                    &recordings,
+                    &password_input,
+                    &channel9_input,
+                    &channel9_login,
+                    recorder_message.as_str(),
+                    screen,
+                )?;
+            }
+        }
+
+        if maybe_schedule_channel9_auto_poll(&config, &mut channel9_login)
+            && process_channel9_login_request(
+                &board,
+                wifi.as_mut(),
+                &mut config,
+                &mut channel9_login,
+            )
+        {
+            render_screen(
+                &mut board,
+                wifi.as_ref(),
+                ble.as_ref(),
+                &mut time,
+                &config,
+                &scan_results,
+                &recordings,
+                &password_input,
+                &channel9_input,
+                &channel9_login,
+                recorder_message.as_str(),
+                screen,
+            )?;
         }
 
         drain_ui_events(
@@ -268,6 +341,8 @@ fn run_display() -> Result<()> {
             &scan_results,
             &recordings,
             &password_input,
+            &channel9_input,
+            &channel9_login,
             recorder_message.as_str(),
             screen,
             &mut rendered_clock,
@@ -284,6 +359,8 @@ fn reduce_screen(
     scan_results: &mut Vec<WifiNetwork>,
     recordings: &mut Vec<RecordingItem>,
     password_input: &mut String,
+    channel9_input: &mut String,
+    channel9_login: &mut Channel9LoginState,
     screen: Screen,
     input: InputEvent,
 ) -> Screen {
@@ -307,7 +384,11 @@ fn reduce_screen(
             3 => Screen::Files,
             4 => Screen::Time { selected: 0 },
             5 => Screen::Audio { selected: 0 },
-            6 => Screen::Recorder { selected: 0 },
+            6 => {
+                ensure_channel9_device_id(board, config);
+                Screen::Channel9 { selected: 0 }
+            }
+            7 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
         (Screen::Wifi { .. }, InputEvent::Back) => Screen::Config { selected: 0 },
@@ -510,7 +591,84 @@ fn reduce_screen(
             Screen::Config { selected: 5 }
         }
         (Screen::Audio { selected }, _) => Screen::Audio { selected },
-        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 6 },
+        (Screen::Channel9 { .. }, InputEvent::Back) => Screen::Config { selected: 6 },
+        (Screen::Channel9 { selected }, InputEvent::Up | InputEvent::Left) => Screen::Channel9 {
+            selected: selected.saturating_sub(1),
+        },
+        (Screen::Channel9 { selected }, InputEvent::Down | InputEvent::Right) => Screen::Channel9 {
+            selected: (selected + 1)
+                .min(channel9_item_count(config, channel9_login).saturating_sub(1)),
+        },
+        (Screen::Channel9 { selected }, InputEvent::Select) => {
+            if channel9_logged_in(config) {
+                match selected {
+                    5 => {
+                        config.channel9.access_token = None;
+                        config.channel9.token_expires_at = None;
+                        channel9_login.active_code = None;
+                        channel9_login.next_poll_at = None;
+                        channel9_login.pending_request = None;
+                        channel9_login.message = "Token cleared".to_owned();
+                        save_config(board, config);
+                        return Screen::Channel9 { selected: 0 };
+                    }
+                    6 => return Screen::Config { selected: 6 },
+                    _ => {}
+                }
+            } else {
+                let has_active_code = channel9_login.active_code.is_some();
+                match (has_active_code, selected) {
+                    (true, 0) => {
+                        channel9_login.pending_request = Some(Channel9LoginRequest::Poll);
+                        channel9_login.message = "Checking...".to_owned();
+                    }
+                    (false, 0) => {
+                        channel9_login.pending_request = Some(Channel9LoginRequest::Create);
+                        channel9_login.message = "Creating...".to_owned();
+                    }
+                    (_, 1) => {
+                        channel9_input.clear();
+                        channel9_input.push_str(config.channel9.device_id.as_str());
+                        return Screen::Channel9Input {
+                            field: Channel9InputField::Device,
+                        };
+                    }
+                    (true, 2) => {
+                        channel9_login.pending_request = Some(Channel9LoginRequest::Create);
+                        channel9_login.message = "Refreshing...".to_owned();
+                    }
+                    (false, 2) | (true, 3) => return Screen::Config { selected: 6 },
+                    _ => {}
+                }
+            }
+            Screen::Channel9 { selected }
+        }
+        (Screen::Channel9Input { .. }, InputEvent::Back) => Screen::Channel9 { selected: 0 },
+        (Screen::Channel9Input { field }, InputEvent::Backspace) => {
+            channel9_input.pop();
+            Screen::Channel9Input { field }
+        }
+        (Screen::Channel9Input { field }, InputEvent::Char(value)) => {
+            if channel9_input.len() < 128 {
+                channel9_input.push(value);
+            }
+            Screen::Channel9Input { field }
+        }
+        (Screen::Channel9Input { field }, InputEvent::Select) => {
+            match field {
+                Channel9InputField::Device => {
+                    config.channel9.device_id = channel9_input.trim().to_owned();
+                }
+            }
+            channel9_input.clear();
+            save_config(board, config);
+            channel9_login.active_code = None;
+            channel9_login.next_poll_at = None;
+            channel9_login.pending_request = None;
+            channel9_login.message = "Press Refresh".to_owned();
+            Screen::Channel9 { selected: 0 }
+        }
+        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 7 },
         (Screen::Recorder { selected }, InputEvent::Up | InputEvent::Left) => Screen::Recorder {
             selected: selected.saturating_sub(1),
         },
@@ -550,7 +708,7 @@ fn reduce_screen(
 }
 
 const CONFIG_ITEMS: &[&str] = &[
-    "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Recorder",
+    "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Channel9", "Recorder",
 ];
 const WIFI_ITEMS: &[&str] = &[
     "Auto Connect",
@@ -562,6 +720,15 @@ const WIFI_ITEMS: &[&str] = &[
 const STORAGE_ITEMS: &[&str] = &["Prefer SD", "Mount Path", "Files", "Back"];
 const TIME_ITEMS: &[&str] = &["Auto Sync", "SNTP Server", "UTC Offset", "Sync Now", "Back"];
 const AUDIO_ITEMS: &[&str] = &["Volume", "Back"];
+const CHANNEL9_STATUS_ITEMS: &[&str] = &[
+    "Status",
+    "Workspace",
+    "Device",
+    "Token",
+    "Expires",
+    "Clear",
+    "Back",
+];
 const SNTP_SERVERS: &[&str] = &[
     "ntp.tuna.tsinghua.edu.cn",
     "time.pool.aliyun.com",
@@ -588,6 +755,8 @@ fn render_screen(
     scan_results: &[WifiNetwork],
     recordings: &[RecordingItem],
     password_input: &str,
+    channel9_input: &str,
+    channel9_login: &Channel9LoginState,
     recorder_message: &str,
     screen: Screen,
 ) -> Result<()> {
@@ -947,6 +1116,47 @@ fn render_screen(
                 status_bar,
             )
         }
+        Screen::Channel9 { selected } => {
+            let workspace = truncate_runtime_label(config.channel9.workspace_id.as_str());
+            let device = truncate_runtime_label(config.channel9.device_id.as_str());
+            let expires = channel9_epoch_label(config.channel9.token_expires_at);
+            let code_value = channel9_user_code_label(config, wifi, channel9_login);
+            channel9_ui::draw_channel9_screen(
+                board.display_mut(),
+                Channel9View {
+                    logged_in: channel9_logged_in(config),
+                    selected,
+                    user_code: code_value.as_str(),
+                    device: device.as_str(),
+                    workspace: workspace.as_str(),
+                    expires: expires.as_str(),
+                    message: channel9_login.message.as_str(),
+                    ready: channel9_login_ready(config, wifi),
+                    has_active_code: channel9_login.active_code.is_some(),
+                },
+                status_bar,
+            )
+        }
+        Screen::Channel9Input { field } => {
+            let title = match field {
+                Channel9InputField::Device => "DEVICE",
+            };
+            let input_value = truncate_runtime_label(channel9_input);
+            let items = [SettingItem {
+                label: title,
+                value: input_value.as_str(),
+                selected: true,
+                enabled: true,
+            }];
+            channel9_ui::draw_settings_screen(
+                board.display_mut(),
+                "CHANNEL9",
+                "Type value",
+                &items,
+                "Enter: Save  ESC: Back",
+                status_bar,
+            )
+        }
         Screen::Recorder { selected } => {
             let recording_rows: Vec<(String, heapless::String<16>)> = recordings
                 .iter()
@@ -1251,6 +1461,8 @@ fn drain_ui_events(
     scan_results: &[WifiNetwork],
     recordings: &[RecordingItem],
     password_input: &str,
+    channel9_input: &str,
+    channel9_login: &Channel9LoginState,
     recorder_message: &str,
     screen: Screen,
     rendered_clock: &mut heapless::String<6>,
@@ -1276,6 +1488,8 @@ fn drain_ui_events(
                     scan_results,
                     recordings,
                     password_input,
+                    channel9_input,
+                    channel9_login,
                     recorder_message,
                     screen,
                 )?;
@@ -1326,6 +1540,322 @@ fn apply_audio_config(board: &mut CardputerAdv, config: &AppConfig) {
     if let Err(err) = board.set_speaker_volume_percent(config.audio.speaker_volume_percent) {
         log::warn!("speaker volume apply failed: {err:?}");
     }
+}
+
+fn create_channel9_device_code(
+    board: &CardputerAdv,
+    wifi: Option<&mut Channel9Wifi>,
+    config: &mut AppConfig,
+    login: &mut Channel9LoginState,
+) {
+    login.message.clear();
+    if let Some(reason) = channel9_login_blocked_reason(config, wifi.as_deref()) {
+        login.message = reason.to_owned();
+        return;
+    }
+
+    let client = Channel9HttpClient::new(channel9_api_base_url(config));
+    match client.create_device_code(
+        config.channel9.device_id.as_str(),
+        config.channel9.description.as_str(),
+        &config.channel9.interfaces,
+    ) {
+        Ok(code) => {
+            let user_code = channel9_format_user_code(code.user_code.as_str());
+            login.next_poll_at = Some(Instant::now() + channel9_poll_interval(&code));
+            login.message = format!("Waiting {user_code}");
+            login.active_code = Some(code);
+            config.channel9.access_token = None;
+            config.channel9.token_expires_at = None;
+            save_config(board, config);
+        }
+        Err(err) => {
+            log::warn!("channel9 device code create failed: {err:?}");
+            log_channel9_network_context("create", config, wifi.as_deref());
+            login.message = channel9_error_label("Create failed", wifi.as_deref(), &err);
+        }
+    }
+}
+
+fn ensure_channel9_device_id(board: &CardputerAdv, config: &mut AppConfig) {
+    let current = config.channel9.device_id.trim();
+    if !current.is_empty() && current != "cardputer-adv" {
+        return;
+    }
+
+    let random = unsafe { esp_idf_svc::sys::esp_random() };
+    config.channel9.device_id = format!("cardputer_{random:08x}");
+    save_config(board, config);
+}
+
+fn poll_channel9_device_token(
+    board: &CardputerAdv,
+    wifi: Option<&mut Channel9Wifi>,
+    config: &mut AppConfig,
+    login: &mut Channel9LoginState,
+) {
+    login.message.clear();
+    if !wifi
+        .as_deref()
+        .map(|wifi| wifi.status() == WifiStatus::Connected)
+        .unwrap_or(false)
+    {
+        login.next_poll_at = login
+            .active_code
+            .as_ref()
+            .map(|code| Instant::now() + channel9_poll_interval(code));
+        login.message = "WiFi offline".to_owned();
+        return;
+    }
+
+    if login.active_code.is_none() {
+        login.message = "Create code first".to_owned();
+        return;
+    }
+    if channel9_active_code_expired(login) {
+        login.active_code = None;
+        login.next_poll_at = None;
+        login.message = "Code expired".to_owned();
+        return;
+    }
+    let Some(code) = login.active_code.as_ref() else {
+        login.message = "Create code first".to_owned();
+        return;
+    };
+
+    let client = Channel9HttpClient::new(channel9_api_base_url(config));
+    match client.poll_device_token(code.device_code.as_str()) {
+        Ok(PollToken::Pending) => {
+            let user_code = channel9_format_user_code(code.user_code.as_str());
+            login.next_poll_at = Some(Instant::now() + channel9_poll_interval(code));
+            login.message = format!("Waiting {user_code}");
+        }
+        Ok(PollToken::Approved(token)) => {
+            config.channel9.access_token = Some(token.access_token);
+            config.channel9.token_expires_at = Some(token.expires_at);
+            config.channel9.workspace_id = token.workspace_id;
+            config.channel9.device_id = token.device_id;
+            login.message = "Activated".to_owned();
+            login.active_code = None;
+            login.next_poll_at = None;
+            save_config(board, config);
+        }
+        Err(err) => {
+            login.next_poll_at = login
+                .active_code
+                .as_ref()
+                .map(|code| Instant::now() + channel9_poll_interval(code));
+            log::warn!("channel9 token poll failed: {err:?}");
+            log_channel9_network_context("poll", config, wifi.as_deref());
+            login.message = channel9_error_label("Poll failed", wifi.as_deref(), &err);
+        }
+    }
+}
+
+fn process_channel9_login_request(
+    board: &CardputerAdv,
+    wifi: Option<&mut Channel9Wifi>,
+    config: &mut AppConfig,
+    login: &mut Channel9LoginState,
+) -> bool {
+    let Some(request) = login.pending_request.take() else {
+        return false;
+    };
+    FreeRtos::delay_ms(250);
+    match request {
+        Channel9LoginRequest::Create => create_channel9_device_code(board, wifi, config, login),
+        Channel9LoginRequest::Poll => poll_channel9_device_token(board, wifi, config, login),
+    }
+    true
+}
+
+fn maybe_schedule_channel9_auto_poll(config: &AppConfig, login: &mut Channel9LoginState) -> bool {
+    if channel9_logged_in(config) || login.active_code.is_none() || login.pending_request.is_some()
+    {
+        return false;
+    }
+    if channel9_active_code_expired(login) {
+        login.active_code = None;
+        login.next_poll_at = None;
+        login.message = "Code expired".to_owned();
+        return false;
+    }
+
+    let should_poll = login
+        .next_poll_at
+        .map(|next_poll_at| Instant::now() >= next_poll_at)
+        .unwrap_or(true);
+    if !should_poll {
+        return false;
+    }
+
+    login.pending_request = Some(Channel9LoginRequest::Poll);
+    login.message = "Checking approval".to_owned();
+    true
+}
+
+fn channel9_poll_interval(code: &DeviceCode) -> Duration {
+    let seconds = code.interval_seconds.clamp(1, 60) as u64;
+    Duration::from_secs(seconds)
+}
+
+fn channel9_active_code_expired(login: &Channel9LoginState) -> bool {
+    let Some(code) = login.active_code.as_ref() else {
+        return false;
+    };
+    let Ok(elapsed) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let now = elapsed.as_secs() as i64;
+    now >= code.activation_expires_at
+}
+
+fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
+    channel9_login_blocked_reason(config, wifi).is_none()
+}
+
+fn channel9_login_blocked_reason(
+    config: &AppConfig,
+    wifi: Option<&Channel9Wifi>,
+) -> Option<&'static str> {
+    if config.channel9.device_id.trim().is_empty() {
+        return Some("Set Device first");
+    }
+    if !wifi
+        .map(|wifi| wifi.status() == WifiStatus::Connected)
+        .unwrap_or(false)
+    {
+        return Some("WiFi offline");
+    }
+    None
+}
+
+fn channel9_logged_in(config: &AppConfig) -> bool {
+    config.channel9.access_token.is_some()
+}
+
+fn channel9_api_base_url(config: &AppConfig) -> &str {
+    let value = config.channel9.api_base_url.trim();
+    if value.is_empty() {
+        "https://app.linkerdog.work"
+    } else {
+        value
+    }
+}
+
+fn channel9_item_count(config: &AppConfig, login: &Channel9LoginState) -> usize {
+    if channel9_logged_in(config) {
+        CHANNEL9_STATUS_ITEMS.len()
+    } else if login.active_code.is_some() {
+        4
+    } else {
+        3
+    }
+}
+
+fn channel9_user_code_label(
+    config: &AppConfig,
+    wifi: Option<&Channel9Wifi>,
+    login: &Channel9LoginState,
+) -> heapless::String<24> {
+    let mut label = heapless::String::new();
+    if let Some(code) = login.active_code.as_ref() {
+        let user_code = channel9_format_user_code(code.user_code.as_str());
+        let _ = label.push_str(user_code.as_str());
+    } else if let Some(reason) = channel9_login_blocked_reason(config, wifi) {
+        let _ = label.push_str(reason);
+    } else {
+        let _ = label.push_str("Press CREATE");
+    }
+    label
+}
+
+fn channel9_format_user_code(value: &str) -> heapless::String<16> {
+    let mut output = heapless::String::<16>::new();
+    let normalized = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase());
+    for (index, ch) in normalized.take(12).enumerate() {
+        if index == 4 {
+            let _ = output.push('-');
+        }
+        let _ = output.push(ch);
+    }
+    output
+}
+
+fn channel9_error_label(
+    prefix: &str,
+    wifi: Option<&Channel9Wifi>,
+    error: &anyhow::Error,
+) -> String {
+    let detail = channel9_error_summary(wifi, error);
+    if detail.is_empty() {
+        return prefix.to_owned();
+    }
+    let mut message = String::with_capacity(prefix.len() + 2 + 32);
+    message.push_str(prefix);
+    message.push_str(": ");
+    message.extend(detail.chars().take(32));
+    message
+}
+
+fn channel9_error_summary(wifi: Option<&Channel9Wifi>, error: &anyhow::Error) -> String {
+    let chain = format!("{error:?}");
+    if chain.contains("ESP_ERR_HTTP_CONNECT") {
+        return match wifi.and_then(|wifi| wifi.connection_info()) {
+            Some(info) if info.dns_primary == "0.0.0.0" && info.dns_secondary == "0.0.0.0" => {
+                "HTTPS connect; DNS missing".to_owned()
+            }
+            Some(_) => "HTTPS connect failed".to_owned(),
+            None => "HTTPS connect; WiFi info missing".to_owned(),
+        };
+    }
+    error.to_string()
+}
+
+fn log_channel9_network_context(operation: &str, config: &AppConfig, wifi: Option<&Channel9Wifi>) {
+    match wifi.and_then(|wifi| wifi.connection_info()) {
+        Some(info) => log::warn!(
+            "channel9 {operation} network context: endpoint={}, ssid={}, ip={}, gateway={}, dns={}, secondary_dns={}",
+            channel9_api_base_url(config),
+            info.ssid,
+            info.ip,
+            info.gateway,
+            info.dns_primary,
+            info.dns_secondary
+        ),
+        None => log::warn!(
+            "channel9 {operation} network context unavailable: endpoint={}",
+            channel9_api_base_url(config)
+        ),
+    }
+}
+
+fn channel9_epoch_label(value: Option<i64>) -> heapless::String<24> {
+    let mut label = heapless::String::new();
+    if let Some(value) = value {
+        let _ = core::fmt::write(&mut label, format_args!("{value}"));
+    } else {
+        let _ = label.push_str("-");
+    }
+    label
+}
+
+fn truncate_runtime_label(value: &str) -> heapless::String<24> {
+    let mut output = heapless::String::<24>::new();
+    let mut chars = value.chars();
+    for _ in 0..23 {
+        let Some(ch) = chars.next() else {
+            return output;
+        };
+        let _ = output.push(ch);
+    }
+    if chars.next().is_some() {
+        let _ = output.push('~');
+    }
+    output
 }
 
 #[derive(Debug, Default, Clone)]

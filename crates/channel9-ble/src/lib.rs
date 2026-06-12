@@ -1,14 +1,23 @@
+#[cfg(esp_idf_bt_enabled)]
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+#[cfg(esp_idf_bt_enabled)]
+use anyhow::Context;
+use anyhow::Result;
 use esp_idf_hal::modem::BluetoothModem;
+#[cfg(esp_idf_bt_enabled)]
 use esp_idf_svc::bt::ble::gap::{AdvConfiguration, BleGapEvent, EspBleGap};
+#[cfg(esp_idf_bt_enabled)]
 use esp_idf_svc::bt::{Ble, BtDriver, BtStatus};
+#[cfg(esp_idf_bt_enabled)]
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 
+#[cfg(esp_idf_bt_enabled)]
 const DEVICE_NAME: &str = "Channel9";
 
+#[cfg(esp_idf_bt_enabled)]
 type BleDriver = BtDriver<'static, Ble>;
+#[cfg(esp_idf_bt_enabled)]
 type BleGap = Arc<EspBleGap<'static, Ble, Arc<BleDriver>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,18 +28,24 @@ pub enum BleStatus {
     Failed,
 }
 
+#[cfg(esp_idf_bt_enabled)]
 #[derive(Debug)]
 struct BleState {
     status: BleStatus,
     last_error: Option<String>,
 }
 
+#[cfg(esp_idf_bt_enabled)]
 pub struct Channel9Ble {
     _driver: Arc<BleDriver>,
     gap: BleGap,
     state: Arc<Mutex<BleState>>,
 }
 
+#[cfg(not(esp_idf_bt_enabled))]
+pub struct Channel9Ble;
+
+#[cfg(esp_idf_bt_enabled)]
 impl Channel9Ble {
     pub fn new(modem: BluetoothModem<'static>) -> Result<Self> {
         let nvs = EspDefaultNvsPartition::take().ok();
@@ -102,6 +117,30 @@ impl Channel9Ble {
     }
 }
 
+#[cfg(not(esp_idf_bt_enabled))]
+impl Channel9Ble {
+    pub fn new(_modem: BluetoothModem<'static>) -> Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn start_advertising(&self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn stop_advertising(&self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn status(&self) -> BleStatus {
+        BleStatus::Idle
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(esp_idf_bt_enabled)]
 fn handle_gap_event(gap: &BleGap, state: &Arc<Mutex<BleState>>, event: BleGapEvent<'_>) {
     match event {
         BleGapEvent::AdvertisingConfigured(BtStatus::Success) => {
@@ -140,6 +179,7 @@ fn handle_gap_event(gap: &BleGap, state: &Arc<Mutex<BleState>>, event: BleGapEve
     }
 }
 
+#[cfg(esp_idf_bt_enabled)]
 fn set_shared_status(state: &Arc<Mutex<BleState>>, status: BleStatus, last_error: Option<String>) {
     if let Ok(mut state) = state.lock() {
         state.status = status;

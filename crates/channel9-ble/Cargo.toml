@@ -3,6 +3,9 @@ name = "channel9-ble"
 version = "0.1.0"
 edition = "2021"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_bt_enabled)'] }
+
 [dependencies]
 anyhow = "1"
 esp-idf-hal = "0.46.2"

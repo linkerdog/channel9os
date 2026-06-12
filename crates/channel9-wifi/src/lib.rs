@@ -6,6 +6,7 @@ use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 use esp_idf_hal::modem::WifiModem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::sys::{esp, esp_wifi_set_ps};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +91,7 @@ impl Channel9Wifi {
     pub fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
         if !self.wifi.is_started()? {
             self.wifi.start()?;
+            disable_wifi_modem_sleep()?;
             self.status = WifiStatus::Started;
         }
 
@@ -114,15 +116,25 @@ impl Channel9Wifi {
             return Ok(None);
         }
 
-        let Some(credential) = config.credentials.first() else {
+        if config.credentials.is_empty() {
             self.status = WifiStatus::Idle;
             self.last_ssid = None;
             self.last_error = None;
             return Ok(None);
         };
 
-        self.connect(credential)?;
-        Ok(Some(credential.ssid.clone()))
+        let candidates = match self.saved_credentials_in_scan_order(config) {
+            Ok(candidates) if !candidates.is_empty() => candidates,
+            Ok(_) => return Ok(None),
+            Err(err) => {
+                log::warn!(
+                    "wifi startup scan failed; trying saved networks in config order: {err:?}"
+                );
+                config.credentials.clone()
+            }
+        };
+
+        self.connect_candidates(&candidates)
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -167,6 +179,7 @@ impl Channel9Wifi {
         if !self.wifi.is_started()? {
             self.wifi.start()?;
         }
+        disable_wifi_modem_sleep()?;
         self.status = WifiStatus::Started;
         let result = self.wifi.connect().and_then(|_| self.wifi.wait_netif_up());
         match result {
@@ -181,4 +194,52 @@ impl Channel9Wifi {
             }
         }
     }
+
+    fn saved_credentials_in_scan_order(
+        &mut self,
+        config: &WifiConfig,
+    ) -> Result<Vec<WifiCredential>> {
+        let networks = self.scan()?;
+        let mut credentials = Vec::new();
+        for network in networks {
+            if credentials
+                .iter()
+                .any(|credential: &WifiCredential| credential.ssid == network.ssid)
+            {
+                continue;
+            }
+            if let Some(credential) = config
+                .credentials
+                .iter()
+                .find(|credential| credential.ssid == network.ssid)
+            {
+                credentials.push(credential.clone());
+            }
+        }
+        Ok(credentials)
+    }
+
+    fn connect_candidates(&mut self, credentials: &[WifiCredential]) -> Result<Option<String>> {
+        let mut last_error = None;
+        for credential in credentials {
+            match self.connect(credential) {
+                Ok(()) => return Ok(Some(credential.ssid.clone())),
+                Err(err) => {
+                    log::warn!("wifi auto connect failed for {}: {err:?}", credential.ssid);
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        if let Some(err) = last_error {
+            Err(err)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn disable_wifi_modem_sleep() -> Result<()> {
+    esp!(unsafe { esp_wifi_set_ps(0) }).context("failed to disable wifi modem sleep")?;
+    Ok(())
 }
