@@ -6,6 +6,7 @@ use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 use esp_idf_hal::modem::WifiModem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::sys::{esp, esp_wifi_set_ps};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +91,7 @@ impl Channel9Wifi {
     pub fn scan(&mut self) -> Result<Vec<WifiNetwork>> {
         if !self.wifi.is_started()? {
             self.wifi.start()?;
+            disable_wifi_modem_sleep()?;
             self.status = WifiStatus::Started;
         }
 
@@ -167,6 +169,7 @@ impl Channel9Wifi {
         if !self.wifi.is_started()? {
             self.wifi.start()?;
         }
+        disable_wifi_modem_sleep()?;
         self.status = WifiStatus::Started;
         let result = self.wifi.connect().and_then(|_| self.wifi.wait_netif_up());
         match result {
@@ -181,4 +184,9 @@ impl Channel9Wifi {
             }
         }
     }
+}
+
+fn disable_wifi_modem_sleep() -> Result<()> {
+    esp!(unsafe { esp_wifi_set_ps(0) }).context("failed to disable wifi modem sleep")?;
+    Ok(())
 }
