@@ -104,12 +104,11 @@ approved response.
 
 - If no token is stored, the Channel9 settings screen shows login state and a `Refresh` action.
 - Opening the Channel9 settings screen must not implicitly start an HTTPS request.
-- Selecting `Refresh` creates a new device code.
-- If an active `device_code` is already present in RAM, the firmware must reuse it and must not
-  create another pending code for the same device.
+- Selecting `Refresh` creates a new device code. A pending, unapproved code may be replaced.
 - Selecting `Poll` checks whether the browser has approved the active device code.
 - If a token is stored, the settings screen displays login status and metadata, including
   `workspace_id`.
+- If a token is stored, the firmware must not create another device code unless login is cleared.
 - Clearing login removes the token metadata and returns to the device-code login flow.
 
 ## Firmware Endpoint Configuration

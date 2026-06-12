@@ -359,14 +359,7 @@ where
         display,
         &[
             (primary, view.selected == 0 || view.selected == 2),
-            (
-                if view.has_active_code {
-                    "POLL"
-                } else {
-                    "RETRY"
-                },
-                view.selected == 3,
-            ),
+            ("NEW", view.selected == 3),
             ("DEVICE", view.selected == 1),
             ("BACK", view.selected == 4),
         ],
