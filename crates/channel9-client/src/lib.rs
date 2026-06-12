@@ -119,7 +119,11 @@ impl Channel9HttpClient {
         let mut client = HttpClient::wrap(EspHttpConnection::new(&Default::default())?);
         let mut request = client
             .post(url.as_str(), &headers)
-            .with_context(|| format!("failed to start POST {url}"))?;
+            .with_context(|| {
+                format!(
+                    "failed to connect to Channel9 HTTPS endpoint {url}; check WiFi IP, DNS, TLS time, and server reachability"
+                )
+            })?;
         write_all(&mut request, &body)?;
         request.flush()?;
         let mut response = request.submit()?;

@@ -1645,7 +1645,8 @@ fn create_channel9_device_code(
         }
         Err(err) => {
             log::warn!("channel9 device code create failed: {err:?}");
-            login.message = channel9_error_label("Create failed", &err);
+            log_channel9_network_context("create", wifi.as_deref());
+            login.message = channel9_error_label("Create failed", wifi.as_deref(), &err);
         }
     }
 }
@@ -1699,7 +1700,8 @@ fn poll_channel9_device_token(
         }
         Err(err) => {
             log::warn!("channel9 token poll failed: {err:?}");
-            login.message = channel9_error_label("Poll failed", &err);
+            log_channel9_network_context("poll", wifi.as_deref());
+            login.message = channel9_error_label("Poll failed", wifi.as_deref(), &err);
         }
     }
 }
@@ -1785,8 +1787,12 @@ fn channel9_format_user_code(value: &str) -> heapless::String<16> {
     output
 }
 
-fn channel9_error_label(prefix: &str, error: &anyhow::Error) -> String {
-    let detail = error.to_string();
+fn channel9_error_label(
+    prefix: &str,
+    wifi: Option<&Channel9Wifi>,
+    error: &anyhow::Error,
+) -> String {
+    let detail = channel9_error_summary(wifi, error);
     if detail.is_empty() {
         return prefix.to_owned();
     }
@@ -1795,6 +1801,34 @@ fn channel9_error_label(prefix: &str, error: &anyhow::Error) -> String {
     message.push_str(": ");
     message.extend(detail.chars().take(32));
     message
+}
+
+fn channel9_error_summary(wifi: Option<&Channel9Wifi>, error: &anyhow::Error) -> String {
+    let chain = format!("{error:?}");
+    if chain.contains("ESP_ERR_HTTP_CONNECT") {
+        return match wifi.and_then(|wifi| wifi.connection_info()) {
+            Some(info) if info.dns_primary == "0.0.0.0" && info.dns_secondary == "0.0.0.0" => {
+                "HTTPS connect; DNS missing".to_owned()
+            }
+            Some(_) => "HTTPS connect failed".to_owned(),
+            None => "HTTPS connect; WiFi info missing".to_owned(),
+        };
+    }
+    error.to_string()
+}
+
+fn log_channel9_network_context(operation: &str, wifi: Option<&Channel9Wifi>) {
+    match wifi.and_then(|wifi| wifi.connection_info()) {
+        Some(info) => log::warn!(
+            "channel9 {operation} network context: ssid={}, ip={}, gateway={}, dns={}, secondary_dns={}",
+            info.ssid,
+            info.ip,
+            info.gateway,
+            info.dns_primary,
+            info.dns_secondary
+        ),
+        None => log::warn!("channel9 {operation} network context unavailable"),
+    }
 }
 
 fn channel9_epoch_label(value: Option<i64>) -> heapless::String<24> {
