@@ -48,6 +48,8 @@ pub struct AudioConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Channel9Config {
+    #[serde(default = "default_channel9_api_base_url")]
+    pub api_base_url: String,
     pub workspace_id: String,
     pub device_id: String,
     pub interfaces: Vec<String>,
@@ -76,6 +78,7 @@ impl Default for TimeConfig {
 impl Default for Channel9Config {
     fn default() -> Self {
         Self {
+            api_base_url: default_channel9_api_base_url(),
             workspace_id: String::new(),
             device_id: "cardputer-adv".to_owned(),
             interfaces: vec!["display".to_owned(), "speaker".to_owned()],
@@ -83,6 +86,10 @@ impl Default for Channel9Config {
             token_expires_at: None,
         }
     }
+}
+
+fn default_channel9_api_base_url() -> String {
+    "https://app.linkerdog.work".to_owned()
 }
 
 impl Default for AppConfig {

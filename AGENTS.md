@@ -23,6 +23,7 @@ Channel9 device-code login follows the SaaS spec in `docs/channel9-device-code-l
 - Browser approval binds the pending code to the signed-in account's default workspace.
 - Firmware receives `workspace_id` only after token polling returns an approved device token.
 - `Channel9Config.workspace_id` stores `workspace_id` metadata from the token response, not a user input for login.
+- `Channel9Config.api_base_url` stores the Channel9 API endpoint. It defaults to `https://app.linkerdog.work` and must not be sent in the device-code request body.
 - The Channel9 settings screen should not ask the user to type `workspace_id` before showing a device code.
 - The human-visible user code uses `-` as its separator, for example `ABCD-1234`.
 

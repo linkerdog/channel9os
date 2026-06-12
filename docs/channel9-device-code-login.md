@@ -110,6 +110,17 @@ approved response.
   `workspace_id`.
 - Clearing login removes the token metadata and returns to the device-code login flow.
 
+## Firmware Endpoint Configuration
+
+The firmware stores the Channel9 API endpoint in `Channel9Config.api_base_url`.
+
+- The default value is `https://app.linkerdog.work`.
+- The value is not sent in the device-code request body.
+- The value may be changed in persisted config to compare the Cloudflare application host with a
+  direct API Gateway host without rebuilding firmware.
+- The HTTPS client must use the configured URL host as the effective SNI host.
+- The HTTPS client must attach the ESP-IDF certificate bundle for server certificate validation.
+
 ## Error Semantics
 
 - `authorization_pending`: the browser has not approved the code yet.
@@ -117,3 +128,5 @@ approved response.
 - `channel9_device_code_not_found`: the code was swept, cleaned up, or never existed.
 - Network failures should be shown as a short actionable status on the device screen and logged over
   serial with the detailed error.
+- HTTPS connection failures should log the endpoint, URL host, SNI host, CA bundle mode, timeout,
+  WiFi SSID, IP, gateway, and DNS addresses.

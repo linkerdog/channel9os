@@ -17,7 +17,6 @@ use std::time::Duration;
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
-const CHANNEL9_API_BASE_URL: &str = "https://app.linkerdog.work";
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -1630,7 +1629,7 @@ fn create_channel9_device_code(
         return;
     }
 
-    let client = Channel9HttpClient::new(CHANNEL9_API_BASE_URL);
+    let client = Channel9HttpClient::new(channel9_api_base_url(config));
     match client.create_device_code(
         config.channel9.device_id.as_str(),
         &config.channel9.interfaces,
@@ -1645,7 +1644,7 @@ fn create_channel9_device_code(
         }
         Err(err) => {
             log::warn!("channel9 device code create failed: {err:?}");
-            log_channel9_network_context("create", wifi.as_deref());
+            log_channel9_network_context("create", config, wifi.as_deref());
             login.message = channel9_error_label("Create failed", wifi.as_deref(), &err);
         }
     }
@@ -1683,7 +1682,7 @@ fn poll_channel9_device_token(
         return;
     };
 
-    let client = Channel9HttpClient::new(CHANNEL9_API_BASE_URL);
+    let client = Channel9HttpClient::new(channel9_api_base_url(config));
     match client.poll_device_token(code.device_code.as_str()) {
         Ok(PollToken::Pending) => {
             let user_code = channel9_format_user_code(code.user_code.as_str());
@@ -1700,7 +1699,7 @@ fn poll_channel9_device_token(
         }
         Err(err) => {
             log::warn!("channel9 token poll failed: {err:?}");
-            log_channel9_network_context("poll", wifi.as_deref());
+            log_channel9_network_context("poll", config, wifi.as_deref());
             login.message = channel9_error_label("Poll failed", wifi.as_deref(), &err);
         }
     }
@@ -1745,6 +1744,15 @@ fn channel9_login_blocked_reason(
 
 fn channel9_logged_in(config: &AppConfig) -> bool {
     config.channel9.access_token.is_some()
+}
+
+fn channel9_api_base_url(config: &AppConfig) -> &str {
+    let value = config.channel9.api_base_url.trim();
+    if value.is_empty() {
+        "https://app.linkerdog.work"
+    } else {
+        value
+    }
 }
 
 fn channel9_item_count(config: &AppConfig) -> usize {
@@ -1817,17 +1825,21 @@ fn channel9_error_summary(wifi: Option<&Channel9Wifi>, error: &anyhow::Error) ->
     error.to_string()
 }
 
-fn log_channel9_network_context(operation: &str, wifi: Option<&Channel9Wifi>) {
+fn log_channel9_network_context(operation: &str, config: &AppConfig, wifi: Option<&Channel9Wifi>) {
     match wifi.and_then(|wifi| wifi.connection_info()) {
         Some(info) => log::warn!(
-            "channel9 {operation} network context: ssid={}, ip={}, gateway={}, dns={}, secondary_dns={}",
+            "channel9 {operation} network context: endpoint={}, ssid={}, ip={}, gateway={}, dns={}, secondary_dns={}",
+            channel9_api_base_url(config),
             info.ssid,
             info.ip,
             info.gateway,
             info.dns_primary,
             info.dns_secondary
         ),
-        None => log::warn!("channel9 {operation} network context unavailable"),
+        None => log::warn!(
+            "channel9 {operation} network context unavailable: endpoint={}",
+            channel9_api_base_url(config)
+        ),
     }
 }
 

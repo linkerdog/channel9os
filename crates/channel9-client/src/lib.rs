@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use core::time::Duration;
 use embedded_svc::http::client::Client as HttpClient;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
 use esp_idf_svc::sys::esp_crt_bundle_attach;
@@ -6,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 const RESPONSE_BUFFER_BYTES: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+const USER_AGENT: &str = "channel9os/0.1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel9HttpClient {
@@ -115,9 +118,19 @@ impl Channel9HttpClient {
         let headers = [
             ("content-type", "application/json"),
             ("content-length", content_length.as_str()),
+            ("user-agent", USER_AGENT),
         ];
         let url = format!("{}{}", self.api_base_url, path);
+        let host = endpoint_host(self.api_base_url.as_str()).unwrap_or("unknown");
+        log::info!(
+            "channel9 https request: url={}, host={}, sni={}, ca_bundle=esp_crt_bundle_attach, timeout_ms={}",
+            url,
+            host,
+            host,
+            HTTP_TIMEOUT.as_millis()
+        );
         let http_config = HttpConfiguration {
+            timeout: Some(HTTP_TIMEOUT),
             crt_bundle_attach: Some(esp_crt_bundle_attach),
             ..Default::default()
         };
@@ -191,4 +204,15 @@ fn trim_base_url(mut value: String) -> String {
         value.pop();
     }
     value
+}
+
+fn endpoint_host(value: &str) -> Option<&str> {
+    let without_scheme = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value);
+    without_scheme
+        .split('/')
+        .next()
+        .filter(|host| !host.is_empty())
 }
