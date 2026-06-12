@@ -34,7 +34,7 @@ panic = "abort"
 strip = true
 
 [package.metadata.esp-idf-sys]
-esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "sdkconfig.defaults.ble"]
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
 
 [dependencies]
 anyhow = "1"
