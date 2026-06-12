@@ -758,6 +758,7 @@ where
         "Files" => draw_files_icon(display, center, color),
         "Time" => draw_time_icon(display, center, color),
         "Audio" => draw_audio_icon(display, center, color),
+        "Channel9" => draw_channel9_icon(display, center, color),
         "Recorder" => draw_recorder_icon(display, center, color),
         _ => draw_generic_icon(display, center, color),
     }
@@ -982,6 +983,39 @@ where
         .into_styled(PrimitiveStyle::with_fill(color))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("recorder icon record dot draw failed: {err:?}"))?;
+    Ok(())
+}
+
+fn draw_channel9_icon<D>(display: &mut D, center: Point, color: Rgb565) -> Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    D::Error: core::fmt::Debug,
+{
+    Rectangle::new(Point::new(center.x - 19, center.y - 16), Size::new(38, 28))
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("channel9 badge draw failed: {err:?}"))?;
+    Text::new(
+        "C9",
+        Point::new(center.x - 11, center.y + 6),
+        MonoTextStyle::new(&FONT_10X20, color),
+    )
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("channel9 mark draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 13, center.y + 17),
+        Point::new(center.x + 13, center.y + 17),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("channel9 push line draw failed: {err:?}"))?;
+    Line::new(
+        Point::new(center.x - 6, center.y + 21),
+        Point::new(center.x + 6, center.y + 21),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(color, 2))
+    .draw(display)
+    .map_err(|err| anyhow::anyhow!("channel9 push line draw failed: {err:?}"))?;
     Ok(())
 }
 
