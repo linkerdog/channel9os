@@ -105,7 +105,9 @@ approved response.
 - If no token is stored, the Channel9 settings screen shows login state and a `Refresh` action.
 - Opening the Channel9 settings screen must not implicitly start an HTTPS request.
 - Selecting `Refresh` creates a new device code. A pending, unapproved code may be replaced.
-- Selecting `Poll` checks whether the browser has approved the active device code.
+- After creating a code, the firmware polls the token endpoint every `interval_seconds` until the
+  browser approves the code or the code is replaced.
+- Selecting `Poll` may force an immediate token check for the active device code.
 - If a token is stored, the settings screen displays login status and metadata, including
   `workspace_id`.
 - If a token is stored, the firmware must not create another device code unless login is cleared.

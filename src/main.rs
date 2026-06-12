@@ -13,7 +13,7 @@ use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
@@ -72,6 +72,7 @@ struct Channel9LoginState {
     active_code: Option<DeviceCode>,
     message: String,
     pending_request: Option<Channel9LoginRequest>,
+    next_poll_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +305,30 @@ fn run_display() -> Result<()> {
                     screen,
                 )?;
             }
+        }
+
+        if maybe_schedule_channel9_auto_poll(&config, &mut channel9_login)
+            && process_channel9_login_request(
+                &board,
+                wifi.as_mut(),
+                &mut config,
+                &mut channel9_login,
+            )
+        {
+            render_screen(
+                &mut board,
+                wifi.as_ref(),
+                ble.as_ref(),
+                &mut time,
+                &config,
+                &scan_results,
+                &recordings,
+                &password_input,
+                &channel9_input,
+                &channel9_login,
+                recorder_message.as_str(),
+                screen,
+            )?;
         }
 
         drain_ui_events(
@@ -580,6 +605,8 @@ fn reduce_screen(
                         config.channel9.access_token = None;
                         config.channel9.token_expires_at = None;
                         channel9_login.active_code = None;
+                        channel9_login.next_poll_at = None;
+                        channel9_login.pending_request = None;
                         channel9_login.message = "Token cleared".to_owned();
                         save_config(board, config);
                         return Screen::Channel9 { selected: 0 };
@@ -638,6 +665,8 @@ fn reduce_screen(
             channel9_input.clear();
             save_config(board, config);
             channel9_login.active_code = None;
+            channel9_login.next_poll_at = None;
+            channel9_login.pending_request = None;
             channel9_login.message = "Press Refresh".to_owned();
             Screen::Channel9 { selected: 0 }
         }
@@ -1535,7 +1564,8 @@ fn create_channel9_device_code(
     ) {
         Ok(code) => {
             let user_code = channel9_format_user_code(code.user_code.as_str());
-            login.message = format!("Code {user_code}");
+            login.next_poll_at = Some(Instant::now() + channel9_poll_interval(&code));
+            login.message = format!("Waiting {user_code}");
             login.active_code = Some(code);
             config.channel9.access_token = None;
             config.channel9.token_expires_at = None;
@@ -1585,18 +1615,24 @@ fn poll_channel9_device_token(
     match client.poll_device_token(code.device_code.as_str()) {
         Ok(PollToken::Pending) => {
             let user_code = channel9_format_user_code(code.user_code.as_str());
-            login.message = format!("Pending {user_code}");
+            login.next_poll_at = Some(Instant::now() + channel9_poll_interval(code));
+            login.message = format!("Waiting {user_code}");
         }
         Ok(PollToken::Approved(token)) => {
             config.channel9.access_token = Some(token.access_token);
             config.channel9.token_expires_at = Some(token.expires_at);
             config.channel9.workspace_id = token.workspace_id;
             config.channel9.device_id = token.device_id;
-            login.message = "Login saved".to_owned();
+            login.message = "Activated".to_owned();
             login.active_code = None;
+            login.next_poll_at = None;
             save_config(board, config);
         }
         Err(err) => {
+            login.next_poll_at = login
+                .active_code
+                .as_ref()
+                .map(|code| Instant::now() + channel9_poll_interval(code));
             log::warn!("channel9 token poll failed: {err:?}");
             log_channel9_network_context("poll", config, wifi.as_deref());
             login.message = channel9_error_label("Poll failed", wifi.as_deref(), &err);
@@ -1619,6 +1655,30 @@ fn process_channel9_login_request(
         Channel9LoginRequest::Poll => poll_channel9_device_token(board, wifi, config, login),
     }
     true
+}
+
+fn maybe_schedule_channel9_auto_poll(config: &AppConfig, login: &mut Channel9LoginState) -> bool {
+    if channel9_logged_in(config) || login.active_code.is_none() || login.pending_request.is_some()
+    {
+        return false;
+    }
+
+    let should_poll = login
+        .next_poll_at
+        .map(|next_poll_at| Instant::now() >= next_poll_at)
+        .unwrap_or(true);
+    if !should_poll {
+        return false;
+    }
+
+    login.pending_request = Some(Channel9LoginRequest::Poll);
+    login.message = "Checking approval".to_owned();
+    true
+}
+
+fn channel9_poll_interval(code: &DeviceCode) -> Duration {
+    let seconds = code.interval_seconds.clamp(1, 60) as u64;
+    Duration::from_secs(seconds)
 }
 
 fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {

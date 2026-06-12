@@ -19,6 +19,7 @@ Channel9 device-code login follows the SaaS spec in `docs/channel9-device-code-l
 
 - Firmware creates a device code with `device_id` and `interfaces` only.
 - Firmware may replace a pending, unapproved in-memory `device_code`.
+- After creating a device code, firmware polls the token endpoint every returned `interval_seconds` until approved or replaced.
 - Once a device token is stored, firmware must not create another device code unless login is cleared.
 - Firmware must not send `workspace_id` when creating a device code.
 - A pending device code is not workspace-bound.

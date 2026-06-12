@@ -280,7 +280,7 @@ where
         if view.logged_in {
             "ENTER: Clear  ESC: Back"
         } else if view.has_active_code {
-            "ENTER: Poll  RIGHT: More"
+            "Auto checking approval"
         } else {
             "ENTER: Create  ESC: Back"
         }
@@ -331,8 +331,8 @@ where
         draw_centered_big_text(display, view.user_code, 82, OPERATION)?;
         draw_text(
             display,
-            "Open LinkerDog and approve",
-            Point::new(47, 99),
+            "Waiting for browser approval",
+            Point::new(39, 99),
             MUTED,
         )?;
     } else {
