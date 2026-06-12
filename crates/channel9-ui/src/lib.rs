@@ -350,20 +350,26 @@ where
         )?;
     }
 
-    let primary = if view.has_active_code {
-        "POLL"
+    if view.has_active_code {
+        draw_channel9_action_bar(
+            display,
+            &[
+                ("CHECK", view.selected == 0),
+                ("REFRESH", view.selected == 2),
+                ("DEVICE", view.selected == 1),
+                ("BACK", view.selected == 3),
+            ],
+        )
     } else {
-        "CREATE"
-    };
-    draw_channel9_action_bar(
-        display,
-        &[
-            (primary, view.selected == 0 || view.selected == 2),
-            ("NEW", view.selected == 3),
-            ("DEVICE", view.selected == 1),
-            ("BACK", view.selected == 4),
-        ],
-    )
+        draw_channel9_action_bar(
+            display,
+            &[
+                ("CREATE", view.selected == 0),
+                ("DEVICE", view.selected == 1),
+                ("BACK", view.selected == 2),
+            ],
+        )
+    }
 }
 
 pub fn draw_password_screen<D>(
@@ -1178,9 +1184,9 @@ where
     let mut x = 14;
     for (label, selected) in actions.iter().copied() {
         let width = match label.len() {
-            0..=3 => 42,
-            4..=5 => 48,
-            _ => 58,
+            0..=4 => 38,
+            5..=6 => 46,
+            _ => 54,
         };
         let fill = if selected { SELECTED } else { PANEL };
         let text = if selected { WHITE } else { PRIMARY };

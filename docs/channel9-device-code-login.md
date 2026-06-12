@@ -34,6 +34,7 @@ Important rules:
 - The firmware displays `user_code` after the response succeeds.
 - The human-visible `user_code` uses `-` as its separator, for example `ABCD-1234`.
 - The firmware may also store `device_code` in RAM while the login flow is active.
+- The pending-code UI should show the code as the primary state, poll automatically, and offer refresh instead of requiring manual polling.
 - The firmware must stop polling and show an expired state after `activation_expires_at`.
 
 Response:

@@ -596,7 +596,8 @@ fn reduce_screen(
             selected: selected.saturating_sub(1),
         },
         (Screen::Channel9 { selected }, InputEvent::Down | InputEvent::Right) => Screen::Channel9 {
-            selected: (selected + 1).min(channel9_item_count(config).saturating_sub(1)),
+            selected: (selected + 1)
+                .min(channel9_item_count(config, channel9_login).saturating_sub(1)),
         },
         (Screen::Channel9 { selected }, InputEvent::Select) => {
             if channel9_logged_in(config) {
@@ -615,31 +616,28 @@ fn reduce_screen(
                     _ => {}
                 }
             } else {
-                match selected {
-                    0 if channel9_login.active_code.is_some() => {
+                let has_active_code = channel9_login.active_code.is_some();
+                match (has_active_code, selected) {
+                    (true, 0) => {
                         channel9_login.pending_request = Some(Channel9LoginRequest::Poll);
-                        channel9_login.message = "Polling...".to_owned();
+                        channel9_login.message = "Checking...".to_owned();
                     }
-                    0 => {
+                    (false, 0) => {
                         channel9_login.pending_request = Some(Channel9LoginRequest::Create);
                         channel9_login.message = "Creating...".to_owned();
                     }
-                    2 => {
-                        channel9_login.pending_request = Some(Channel9LoginRequest::Poll);
-                        channel9_login.message = "Polling...".to_owned();
-                    }
-                    1 => {
+                    (_, 1) => {
                         channel9_input.clear();
                         channel9_input.push_str(config.channel9.device_id.as_str());
                         return Screen::Channel9Input {
                             field: Channel9InputField::Device,
                         };
                     }
-                    3 => {
+                    (true, 2) => {
                         channel9_login.pending_request = Some(Channel9LoginRequest::Create);
-                        channel9_login.message = "Creating...".to_owned();
+                        channel9_login.message = "Refreshing...".to_owned();
                     }
-                    4 => return Screen::Config { selected: 6 },
+                    (false, 2) | (true, 3) => return Screen::Config { selected: 6 },
                     _ => {}
                 }
             }
@@ -722,7 +720,6 @@ const WIFI_ITEMS: &[&str] = &[
 const STORAGE_ITEMS: &[&str] = &["Prefer SD", "Mount Path", "Files", "Back"];
 const TIME_ITEMS: &[&str] = &["Auto Sync", "SNTP Server", "UTC Offset", "Sync Now", "Back"];
 const AUDIO_ITEMS: &[&str] = &["Volume", "Back"];
-const CHANNEL9_LOGIN_ITEMS: &[&str] = &["User Code", "Device", "Poll", "Refresh", "Back"];
 const CHANNEL9_STATUS_ITEMS: &[&str] = &[
     "Status",
     "Workspace",
@@ -1603,6 +1600,10 @@ fn poll_channel9_device_token(
         .map(|wifi| wifi.status() == WifiStatus::Connected)
         .unwrap_or(false)
     {
+        login.next_poll_at = login
+            .active_code
+            .as_ref()
+            .map(|code| Instant::now() + channel9_poll_interval(code));
         login.message = "WiFi offline".to_owned();
         return;
     }
@@ -1742,11 +1743,13 @@ fn channel9_api_base_url(config: &AppConfig) -> &str {
     }
 }
 
-fn channel9_item_count(config: &AppConfig) -> usize {
+fn channel9_item_count(config: &AppConfig, login: &Channel9LoginState) -> usize {
     if channel9_logged_in(config) {
         CHANNEL9_STATUS_ITEMS.len()
+    } else if login.active_code.is_some() {
+        4
     } else {
-        CHANNEL9_LOGIN_ITEMS.len()
+        3
     }
 }
 
@@ -1762,7 +1765,7 @@ fn channel9_user_code_label(
     } else if let Some(reason) = channel9_login_blocked_reason(config, wifi) {
         let _ = label.push_str(reason);
     } else {
-        let _ = label.push_str("Enter Create");
+        let _ = label.push_str("Press CREATE");
     }
     label
 }
