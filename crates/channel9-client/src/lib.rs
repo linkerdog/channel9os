@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use embedded_svc::http::client::Client as HttpClient;
-use esp_idf_svc::http::client::EspHttpConnection;
+use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
+use esp_idf_svc::sys::esp_crt_bundle_attach;
 use serde::{Deserialize, Serialize};
 
 const RESPONSE_BUFFER_BYTES: usize = 1024;
@@ -116,7 +117,11 @@ impl Channel9HttpClient {
             ("content-length", content_length.as_str()),
         ];
         let url = format!("{}{}", self.api_base_url, path);
-        let mut client = HttpClient::wrap(EspHttpConnection::new(&Default::default())?);
+        let http_config = HttpConfiguration {
+            crt_bundle_attach: Some(esp_crt_bundle_attach),
+            ..Default::default()
+        };
+        let mut client = HttpClient::wrap(EspHttpConnection::new(&http_config)?);
         let mut request = client
             .post(url.as_str(), &headers)
             .with_context(|| {
