@@ -73,6 +73,7 @@ struct Channel9LoginState {
     message: String,
     pending_request: Option<Channel9LoginRequest>,
     next_poll_at: Option<Instant>,
+    logout_confirm: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,31 +592,52 @@ fn reduce_screen(
             Screen::Config { selected: 5 }
         }
         (Screen::Audio { selected }, _) => Screen::Audio { selected },
-        (Screen::Channel9 { .. }, InputEvent::Back) => Screen::Config { selected: 6 },
-        (Screen::Channel9 { selected }, InputEvent::Up | InputEvent::Left) => Screen::Channel9 {
-            selected: selected.saturating_sub(1),
-        },
-        (Screen::Channel9 { selected }, InputEvent::Down | InputEvent::Right) => Screen::Channel9 {
-            selected: (selected + 1)
-                .min(channel9_item_count(config, channel9_login).saturating_sub(1)),
-        },
+        (Screen::Channel9 { .. }, InputEvent::Back) => {
+            cancel_channel9_logout_confirm(channel9_login);
+            Screen::Config { selected: 6 }
+        }
+        (Screen::Channel9 { selected }, InputEvent::Up | InputEvent::Left) => {
+            cancel_channel9_logout_confirm(channel9_login);
+            Screen::Channel9 {
+                selected: selected.saturating_sub(1),
+            }
+        }
+        (Screen::Channel9 { selected }, InputEvent::Down | InputEvent::Right) => {
+            cancel_channel9_logout_confirm(channel9_login);
+            Screen::Channel9 {
+                selected: (selected + 1)
+                    .min(channel9_item_count(config, channel9_login).saturating_sub(1)),
+            }
+        }
         (Screen::Channel9 { selected }, InputEvent::Select) => {
             if channel9_logged_in(config) {
                 match selected {
                     5 => {
+                        if !channel9_login.logout_confirm {
+                            channel9_login.logout_confirm = true;
+                            channel9_login.message = "Confirm logout?".to_owned();
+                            return Screen::Channel9 { selected };
+                        }
                         config.channel9.access_token = None;
                         config.channel9.token_expires_at = None;
                         channel9_login.active_code = None;
                         channel9_login.next_poll_at = None;
                         channel9_login.pending_request = None;
+                        channel9_login.logout_confirm = false;
                         channel9_login.message = "Token cleared".to_owned();
                         save_config(board, config);
                         return Screen::Channel9 { selected: 0 };
                     }
-                    6 => return Screen::Config { selected: 6 },
-                    _ => {}
+                    6 => {
+                        cancel_channel9_logout_confirm(channel9_login);
+                        return Screen::Config { selected: 6 };
+                    }
+                    _ => {
+                        cancel_channel9_logout_confirm(channel9_login);
+                    }
                 }
             } else {
+                cancel_channel9_logout_confirm(channel9_login);
                 let has_active_code = channel9_login.active_code.is_some();
                 match (has_active_code, selected) {
                     (true, 0) => {
@@ -1692,6 +1714,13 @@ fn maybe_schedule_channel9_auto_poll(config: &AppConfig, login: &mut Channel9Log
     login.pending_request = Some(Channel9LoginRequest::Poll);
     login.message = "Checking approval".to_owned();
     true
+}
+
+fn cancel_channel9_logout_confirm(login: &mut Channel9LoginState) {
+    if login.logout_confirm {
+        login.logout_confirm = false;
+        login.message.clear();
+    }
 }
 
 fn channel9_poll_interval(code: &DeviceCode) -> Duration {

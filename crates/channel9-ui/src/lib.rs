@@ -278,7 +278,7 @@ where
 
     let footer = if view.message.is_empty() {
         if view.logged_in {
-            "ENTER: Clear  ESC: Back"
+            "ENTER: Logout  ESC: Back"
         } else if view.has_active_code {
             "Auto checking approval"
         } else {
@@ -291,7 +291,7 @@ where
         display,
         "CHANNEL9",
         if view.logged_in {
-            "Connected"
+            "Device linked"
         } else {
             "Device login"
         },
@@ -322,7 +322,7 @@ where
         )?;
         draw_channel9_action_bar(
             display,
-            &[("CLEAR", view.selected == 5), ("BACK", view.selected == 6)],
+            &[("LOGOUT", view.selected == 5), ("BACK", view.selected == 6)],
         )?;
         return Ok(());
     }
