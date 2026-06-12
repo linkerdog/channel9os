@@ -6,7 +6,7 @@ use channel9_core::{AppConfig, WifiCredential};
 use channel9_storage::{ConfigStore, JsonConfigStore, list_directory, littlefs2_probe};
 use channel9_time::{Channel9Time, TimeSyncStatus, format_clock};
 use channel9_ui::{
-    FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
+    Channel9View, FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
 };
 use channel9_wifi::{Channel9Wifi, WifiNetwork, WifiStatus};
 use esp_idf_hal::delay::FreeRtos;
@@ -1095,120 +1095,19 @@ fn render_screen(
             let device = truncate_runtime_label(config.channel9.device_id.as_str());
             let expires = channel9_epoch_label(config.channel9.token_expires_at);
             let code_value = channel9_user_code_label(config, wifi, channel9_login);
-            let (items, footer) = if channel9_logged_in(config) {
-                (
-                    [
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[0],
-                            value: "logged in",
-                            selected: selected == 0,
-                            enabled: false,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[1],
-                            value: workspace.as_str(),
-                            selected: selected == 1,
-                            enabled: false,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[2],
-                            value: device.as_str(),
-                            selected: selected == 2,
-                            enabled: false,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[3],
-                            value: "saved",
-                            selected: selected == 3,
-                            enabled: false,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[4],
-                            value: expires.as_str(),
-                            selected: selected == 4,
-                            enabled: false,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[5],
-                            value: "",
-                            selected: selected == 5,
-                            enabled: true,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_STATUS_ITEMS[6],
-                            value: "",
-                            selected: selected == 6,
-                            enabled: true,
-                        },
-                    ],
-                    if channel9_login.message.is_empty() {
-                        "SEL: Clear  ESC: Back"
-                    } else {
-                        channel9_login.message.as_str()
-                    },
-                )
-            } else {
-                (
-                    [
-                        SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[0],
-                            value: code_value.as_str(),
-                            selected: selected == 0,
-                            enabled: channel9_login_ready(config, wifi)
-                                || channel9_login.active_code.is_some(),
-                        },
-                        SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[1],
-                            value: device.as_str(),
-                            selected: selected == 1,
-                            enabled: true,
-                        },
-                        SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[2],
-                            value: "check",
-                            selected: selected == 2,
-                            enabled: channel9_login.active_code.is_some(),
-                        },
-                        SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[3],
-                            value: "new",
-                            selected: selected == 3,
-                            enabled: channel9_login_ready(config, wifi),
-                        },
-                        SettingItem {
-                            label: CHANNEL9_LOGIN_ITEMS[4],
-                            value: "",
-                            selected: selected == 4,
-                            enabled: true,
-                        },
-                        SettingItem {
-                            label: "",
-                            value: "",
-                            selected: false,
-                            enabled: false,
-                        },
-                        SettingItem {
-                            label: "",
-                            value: "",
-                            selected: false,
-                            enabled: false,
-                        },
-                    ],
-                    if channel9_login.message.is_empty() {
-                        "SEL: Poll/Edit  ESC: Back"
-                    } else {
-                        channel9_login.message.as_str()
-                    },
-                )
-            };
-            let visible_items =
-                visible_setting_items(&items[..channel9_item_count(config)], selected);
-            channel9_ui::draw_settings_screen(
+            channel9_ui::draw_channel9_screen(
                 board.display_mut(),
-                "CHANNEL9",
-                "Device login",
-                &visible_items,
-                footer,
+                Channel9View {
+                    logged_in: channel9_logged_in(config),
+                    selected,
+                    user_code: code_value.as_str(),
+                    device: device.as_str(),
+                    workspace: workspace.as_str(),
+                    expires: expires.as_str(),
+                    message: channel9_login.message.as_str(),
+                    ready: channel9_login_ready(config, wifi),
+                    has_active_code: channel9_login.active_code.is_some(),
+                },
                 status_bar,
             )
         }
