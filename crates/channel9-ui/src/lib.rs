@@ -278,7 +278,7 @@ where
 
     let footer = if view.message.is_empty() {
         if view.logged_in {
-            "ENTER: Clear  ESC: Back"
+            "ENTER: Logout  ESC: Back"
         } else if view.has_active_code {
             "Auto checking approval"
         } else {
