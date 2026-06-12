@@ -18,6 +18,7 @@ The current board implementation is Cardputer-Adv.
 Channel9 device-code login follows the SaaS spec in `docs/channel9-device-code-login.md`.
 
 - Firmware creates a device code with `device_id` and `interfaces` only.
+- Firmware must reuse an active in-memory `device_code` and must not create another pending code for the same device until the current code is cleared, approved, expired, or lost after restart.
 - Firmware must not send `workspace_id` when creating a device code.
 - A pending device code is not workspace-bound.
 - Browser approval binds the pending code to the signed-in account's default workspace.

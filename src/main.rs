@@ -609,8 +609,13 @@ fn reduce_screen(
                         };
                     }
                     3 => {
-                        channel9_login.pending_request = Some(Channel9LoginRequest::Create);
-                        channel9_login.message = "Creating...".to_owned();
+                        if channel9_login.active_code.is_some() {
+                            channel9_login.pending_request = Some(Channel9LoginRequest::Poll);
+                            channel9_login.message = "Polling...".to_owned();
+                        } else {
+                            channel9_login.pending_request = Some(Channel9LoginRequest::Create);
+                            channel9_login.message = "Creating...".to_owned();
+                        }
                     }
                     4 => return Screen::Config { selected: 6 },
                     _ => {}
@@ -1523,6 +1528,11 @@ fn create_channel9_device_code(
     login: &mut Channel9LoginState,
 ) {
     login.message.clear();
+    if let Some(code) = login.active_code.as_ref() {
+        let user_code = channel9_format_user_code(code.user_code.as_str());
+        login.message = format!("Code {user_code}");
+        return;
+    }
     if let Some(reason) = channel9_login_blocked_reason(config, wifi.as_deref()) {
         login.message = reason.to_owned();
         return;
