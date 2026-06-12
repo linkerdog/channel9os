@@ -89,18 +89,12 @@ enum UiEvent {
 fn run_display() -> Result<()> {
     let peripherals = Peripherals::take()?;
     let (board_peripherals, modem) = CardputerAdv::split(peripherals);
-    let (wifi_modem, ble_modem) = modem.split();
+    let (wifi_modem, _ble_modem) = modem.split();
     let mut board = CardputerAdv::new(board_peripherals)?;
     let mut wifi = Channel9Wifi::new(wifi_modem)
         .inspect_err(|err| log::warn!("wifi init failed: {err:?}"))
         .ok();
-    let ble = Channel9Ble::new(ble_modem)
-        .and_then(|ble| {
-            ble.start_advertising()?;
-            Ok(ble)
-        })
-        .inspect_err(|err| log::warn!("ble init failed: {err:?}"))
-        .ok();
+    let ble: Option<Channel9Ble> = None;
     let mut time = Channel9Time::new();
     let mut config = load_config(&board);
     apply_audio_config(&mut board, &config);
@@ -368,10 +362,6 @@ fn reduce_screen(
             5 => Screen::Audio { selected: 0 },
             6 => {
                 ensure_channel9_device_id(board, config);
-                if !channel9_logged_in(config) && channel9_login.active_code.is_none() {
-                    channel9_login.pending_request = Some(Channel9LoginRequest::Create);
-                    channel9_login.message = "Creating...".to_owned();
-                }
                 Screen::Channel9 { selected: 0 }
             }
             7 => Screen::Recorder { selected: 0 },
