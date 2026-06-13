@@ -11,15 +11,12 @@ use channel9_ui::{
 use channel9_wifi::{Channel9Wifi, WifiNetwork, WifiStatus};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
-const CHANNEL9_SSE_WORKER_STACK_BYTES: usize = 12288;
 const CHANNEL9_SSE_INTERVAL: Duration = Duration::from_secs(10);
 
 fn main() {
@@ -87,6 +84,7 @@ struct Channel9PushState {
     detail: String,
     message_count: usize,
     last_cursor: Option<String>,
+    next_fetch_at: Option<Instant>,
 }
 
 impl Default for Channel9PushState {
@@ -97,36 +95,15 @@ impl Default for Channel9PushState {
             detail: "Connect Channel9 to receive pushes".to_owned(),
             message_count: 0,
             last_cursor: None,
+            next_fetch_at: None,
         }
     }
-}
-
-#[derive(Debug)]
-struct Channel9SseWorker {
-    key: String,
-    stop: Arc<AtomicBool>,
-    receiver: Receiver<Channel9SseUpdate>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-#[derive(Debug)]
-enum Channel9SseUpdate {
-    Connected,
-    Messages(Vec<DeviceMessage>),
-    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Channel9SseDrain {
     changed: bool,
     new_messages: usize,
-}
-
-impl Drop for Channel9SseWorker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.handle.take();
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +135,6 @@ fn run_display() -> Result<()> {
     let mut channel9_input = String::new();
     let mut channel9_login = Channel9LoginState::default();
     let mut channel9_push = Channel9PushState::default();
-    let mut channel9_sse_worker: Option<Channel9SseWorker> = None;
     let mut recorder_message = heapless::String::<64>::new();
     let (ui_events_tx, ui_events_rx) = sync_channel::<UiEvent>(4);
     let _ui_scheduler_task = spawn_ui_scheduler(ui_events_tx)?;
@@ -393,13 +369,7 @@ fn run_display() -> Result<()> {
             )?;
         }
 
-        maintain_channel9_sse_worker(
-            wifi.as_ref(),
-            &config,
-            &mut channel9_push,
-            &mut channel9_sse_worker,
-        );
-        let sse_update = drain_channel9_sse_updates(&mut channel9_push, &channel9_sse_worker);
+        let sse_update = maybe_poll_channel9_sse(wifi.as_ref(), &config, &mut channel9_push);
         if sse_update.new_messages > 0 && screen != Screen::Recording {
             if let Err(err) = board.play_pager_beep() {
                 log::warn!("channel9 pager beep failed: {err:?}");
@@ -1612,151 +1582,93 @@ fn drain_ui_events(
     }
 }
 
-fn maintain_channel9_sse_worker(
+fn maybe_poll_channel9_sse(
     wifi: Option<&Channel9Wifi>,
     config: &AppConfig,
     push: &mut Channel9PushState,
-    worker: &mut Option<Channel9SseWorker>,
-) {
+) -> Channel9SseDrain {
     if !channel9_sse_ready(config, wifi) {
-        if let Some(worker) = worker.take() {
-            worker.stop.store(true, Ordering::Relaxed);
-        }
+        let changed = push.online;
         push.online = false;
         if !channel9_logged_in(config) {
             *push = Channel9PushState::default();
         }
-        return;
+        return Channel9SseDrain {
+            changed,
+            new_messages: 0,
+        };
     }
 
-    let Some(key) = channel9_sse_key(config) else {
-        return;
+    let should_poll = push
+        .next_fetch_at
+        .map(|next_fetch_at| Instant::now() >= next_fetch_at)
+        .unwrap_or(true);
+    if !should_poll {
+        return Channel9SseDrain::default();
+    }
+    push.next_fetch_at = Some(Instant::now() + CHANNEL9_SSE_INTERVAL);
+
+    let Some(access_token) = config.channel9.access_token.as_deref() else {
+        push.online = false;
+        return Channel9SseDrain {
+            changed: true,
+            new_messages: 0,
+        };
     };
-    if worker.as_ref().is_some_and(|worker| worker.key == key) {
-        return;
-    }
-    if let Some(worker) = worker.take() {
-        worker.stop.store(true, Ordering::Relaxed);
-    }
-    match spawn_channel9_sse_worker(config, push.last_cursor.clone(), key) {
-        Ok(next_worker) => {
-            *worker = Some(next_worker);
+    let client = Channel9HttpClient::new(channel9_api_base_url(config));
+    match client.open_device_events(
+        config.channel9.device_id.as_str(),
+        access_token,
+        &config.channel9.interfaces,
+        push.last_cursor.as_deref(),
+    ) {
+        Ok(events) => {
+            if !events.connected {
+                push.online = false;
+                push.detail = "Channel9 SSE empty response".to_owned();
+                return Channel9SseDrain {
+                    changed: true,
+                    new_messages: 0,
+                };
+            }
+            apply_channel9_sse_messages(push, events.messages)
         }
         Err(err) => {
             push.online = false;
-            push.detail = format!("SSE start failed: {err:?}");
-            log::warn!("channel9 sse worker start failed: {err:?}");
+            push.detail = channel9_sse_error_label(&err);
+            log::warn!("channel9 sse fetch failed: {err:?}");
+            Channel9SseDrain {
+                changed: true,
+                new_messages: 0,
+            }
         }
     }
 }
 
-fn spawn_channel9_sse_worker(
-    config: &AppConfig,
-    cursor: Option<String>,
-    key: String,
-) -> Result<Channel9SseWorker> {
-    let api_base_url = channel9_api_base_url(config).to_owned();
-    let device_id = config.channel9.device_id.clone();
-    let access_token = config.channel9.access_token.clone().unwrap_or_default();
-    let interfaces = config.channel9.interfaces.clone();
-    let stop = Arc::new(AtomicBool::new(false));
-    let worker_stop = stop.clone();
-    let (sender, receiver) = sync_channel::<Channel9SseUpdate>(4);
-    let handle = thread::Builder::new()
-        .name("channel9-sse".to_owned())
-        .stack_size(CHANNEL9_SSE_WORKER_STACK_BYTES)
-        .spawn(move || {
-            let client = Channel9HttpClient::new(api_base_url);
-            let mut cursor = cursor;
-            while !worker_stop.load(Ordering::Relaxed) {
-                match client.open_device_events(
-                    device_id.as_str(),
-                    access_token.as_str(),
-                    &interfaces,
-                    cursor.as_deref(),
-                ) {
-                    Ok(events) => {
-                        if let Some(message) = events.messages.last() {
-                            cursor = Some(message.cursor.clone());
-                        }
-                        let update = if !events.connected {
-                            Channel9SseUpdate::Failed("Channel9 SSE empty response".to_owned())
-                        } else if events.messages.is_empty() {
-                            Channel9SseUpdate::Connected
-                        } else {
-                            Channel9SseUpdate::Messages(events.messages)
-                        };
-                        match sender.try_send(update) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
-                    Err(err) => {
-                        let message = channel9_sse_error_label(&err);
-                        log::warn!("channel9 sse fetch failed: {err:?}");
-                        match sender.try_send(Channel9SseUpdate::Failed(message)) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
-                }
-                let mut slept = Duration::ZERO;
-                while slept < CHANNEL9_SSE_INTERVAL && !worker_stop.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
-                    slept += Duration::from_millis(100);
-                }
-            }
-        })
-        .map_err(|err| anyhow::anyhow!("failed to spawn channel9 sse task: {err:?}"))?;
-    Ok(Channel9SseWorker {
-        key,
-        stop,
-        receiver,
-        handle: Some(handle),
-    })
-}
-
-fn drain_channel9_sse_updates(
+fn apply_channel9_sse_messages(
     push: &mut Channel9PushState,
-    worker: &Option<Channel9SseWorker>,
+    messages: Vec<DeviceMessage>,
 ) -> Channel9SseDrain {
-    let Some(worker) = worker.as_ref() else {
-        return Channel9SseDrain::default();
-    };
     let mut drain = Channel9SseDrain::default();
-    loop {
-        match worker.receiver.try_recv() {
-            Ok(Channel9SseUpdate::Connected) => {
-                push.online = true;
-                if push.message_count == 0 {
-                    push.detail = "Listening for pushes".to_owned();
-                }
-                drain.changed = true;
-            }
-            Ok(Channel9SseUpdate::Messages(messages)) => {
-                push.online = true;
-                for message in messages {
-                    drain.new_messages = drain.new_messages.saturating_add(1);
-                    push.message_count = push.message_count.saturating_add(1);
-                    push.last_cursor = Some(message.cursor.clone());
-                    push.suggestion = message.display_text();
-                    push.detail = message.detail_text();
-                }
-                drain.changed = true;
-            }
-            Ok(Channel9SseUpdate::Failed(message)) => {
-                push.online = false;
-                push.detail = message;
-                drain.changed = true;
-            }
-            Err(TryRecvError::Empty) => return drain,
-            Err(TryRecvError::Disconnected) => {
-                push.online = false;
-                drain.changed = true;
-                return drain;
-            }
+    push.online = true;
+    if messages.is_empty() {
+        if push.message_count == 0 {
+            push.detail = "Listening for pushes".to_owned();
+            drain.changed = true;
+        } else {
+            drain.changed = true;
         }
+        return drain;
     }
+    for message in messages {
+        drain.new_messages = drain.new_messages.saturating_add(1);
+        push.message_count = push.message_count.saturating_add(1);
+        push.last_cursor = Some(message.cursor.clone());
+        push.suggestion = message.display_text();
+        push.detail = message.detail_text();
+    }
+    drain.changed = true;
+    drain
 }
 
 fn channel9_sse_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
@@ -1764,18 +1676,6 @@ fn channel9_sse_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
         && wifi
             .map(|wifi| wifi.status() == WifiStatus::Connected)
             .unwrap_or(false)
-}
-
-fn channel9_sse_key(config: &AppConfig) -> Option<String> {
-    let token = config.channel9.access_token.as_ref()?;
-    Some(format!(
-        "{}:{}:{}:{}:{}",
-        channel9_api_base_url(config),
-        config.channel9.device_id,
-        config.channel9.token_expires_at.unwrap_or_default(),
-        token.len(),
-        config.channel9.interfaces.join(",")
-    ))
 }
 
 fn channel9_sse_error_label(error: &anyhow::Error) -> String {
