@@ -56,6 +56,9 @@ const AUDIO_DMA_BUFFER_COUNT: u32 = 8;
 const AUDIO_DMA_FRAMES_PER_BUFFER: u32 = 124;
 const AUDIO_READ_TIMEOUT_TICKS: u32 = 100;
 const AUDIO_WRITE_TIMEOUT_TICKS: u32 = 100;
+const PAGER_BEEP_AMPLITUDE: i16 = 9_000;
+const PAGER_BEEP_HIGH_HZ: u32 = 1_760;
+const PAGER_BEEP_LOW_HZ: u32 = 1_320;
 const WAV_HEADER_BYTES: usize = 44;
 const STARTUP_PROGRESS_WIDTH: u32 = 184;
 const STARTUP_PROGRESS_HEIGHT: u32 = 10;
@@ -455,6 +458,40 @@ impl CardputerAdv {
         Ok(())
     }
 
+    pub fn play_pager_beep(&mut self) -> Result<()> {
+        if self.recording.is_some() {
+            return Ok(());
+        }
+
+        self.set_speaker_enabled(true)?;
+        let playback_result = (|| -> Result<()> {
+            let i2s = self
+                .i2s
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("i2s is not available"))?;
+            i2s.tx_enable()?;
+            for _ in 0..3 {
+                write_square_tone(i2s, PAGER_BEEP_HIGH_HZ, 55, PAGER_BEEP_AMPLITUDE)?;
+                write_silence(i2s, 25)?;
+                write_square_tone(i2s, PAGER_BEEP_LOW_HZ, 55, PAGER_BEEP_AMPLITUDE)?;
+                write_silence(i2s, 55)?;
+            }
+            Ok(())
+        })();
+
+        let tx_disable_result = if let Some(i2s) = self.i2s.as_mut() {
+            i2s.tx_disable().map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        let speaker_disable_result = self.set_speaker_enabled(false);
+
+        playback_result?;
+        tx_disable_result?;
+        speaker_disable_result?;
+        Ok(())
+    }
+
     pub fn delete_voice_note(&self, path: &str) -> Result<()> {
         fs::remove_file(path)?;
         Ok(())
@@ -627,6 +664,44 @@ fn initialize_i2s(
         Option::<AnyIOPin>::None,
         ws,
     )?)
+}
+
+fn write_square_tone(
+    i2s: &mut I2sDriver<'static, I2sBiDir>,
+    frequency_hz: u32,
+    duration_ms: u32,
+    amplitude: i16,
+) -> Result<()> {
+    let samples = (AUDIO_SAMPLE_RATE_HZ * duration_ms) / 1_000;
+    let half_period = (AUDIO_SAMPLE_RATE_HZ / frequency_hz / 2).max(1);
+    let mut buffer = [0_u8; AUDIO_BUFFER_BYTES];
+    let mut written_samples = 0_u32;
+    while written_samples < samples {
+        let mut offset = 0;
+        while offset + 1 < buffer.len() && written_samples < samples {
+            let phase = (written_samples / half_period) % 2;
+            let value = if phase == 0 { amplitude } else { -amplitude };
+            buffer[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            offset += 2;
+            written_samples += 1;
+        }
+        i2s.write_all(&buffer[..offset], AUDIO_WRITE_TIMEOUT_TICKS)
+            .map_err(anyhow::Error::from)?;
+    }
+    Ok(())
+}
+
+fn write_silence(i2s: &mut I2sDriver<'static, I2sBiDir>, duration_ms: u32) -> Result<()> {
+    let samples = (AUDIO_SAMPLE_RATE_HZ * duration_ms) / 1_000;
+    let mut remaining_bytes = samples as usize * 2;
+    let buffer = [0_u8; AUDIO_BUFFER_BYTES];
+    while remaining_bytes > 0 {
+        let bytes = remaining_bytes.min(buffer.len());
+        i2s.write_all(&buffer[..bytes], AUDIO_WRITE_TIMEOUT_TICKS)
+            .map_err(anyhow::Error::from)?;
+        remaining_bytes -= bytes;
+    }
+    Ok(())
 }
 
 fn mount_sdcard(

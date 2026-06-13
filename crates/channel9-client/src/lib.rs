@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use core::time::Duration;
-use embedded_svc::http::client::Client as HttpClient;
+use embedded_svc::http::client::{Client as HttpClient, Method};
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
 use esp_idf_svc::sys::esp_crt_bundle_attach;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 const RESPONSE_BUFFER_BYTES: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
@@ -67,6 +68,39 @@ pub enum PollToken {
     Approved(DeviceToken),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceEvents {
+    pub connected: bool,
+    pub messages: Vec<DeviceMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceMessage {
+    pub cursor: String,
+    pub message_id: String,
+    pub target_interface: Option<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct DeviceEventBody {
+    event_type: String,
+    cursor: Option<String>,
+    message: Option<MessageSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct MessageSummary {
+    message_id: String,
+    target: MessageTarget,
+    payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct MessageTarget {
+    interface: Option<String>,
+}
+
 impl Channel9HttpClient {
     pub fn new(api_base_url: impl Into<String>) -> Self {
         Self {
@@ -114,6 +148,18 @@ impl Channel9HttpClient {
                 anyhow::bail!("{}: {}", error.code, error.message);
             }
         }
+    }
+
+    pub fn open_device_events(
+        &self,
+        device_id: &str,
+        access_token: &str,
+        interfaces: &[String],
+        cursor: Option<&str>,
+    ) -> Result<DeviceEvents> {
+        let path = device_events_path(device_id, interfaces, cursor);
+        let body = self.get_text(path.as_str(), access_token)?;
+        Ok(parse_sse_events(body.as_str()))
     }
 
     fn post_json<T, R>(&self, path: &str, payload: &T) -> Result<ApiEnvelope<R>>
@@ -183,6 +229,87 @@ impl Channel9HttpClient {
             }
         }
     }
+
+    fn get_text(&self, path: &str, bearer_token: &str) -> Result<String> {
+        let auth_header = format!("Bearer {bearer_token}");
+        let headers = [
+            ("accept", "text/event-stream"),
+            ("user-agent", USER_AGENT),
+            ("authorization", auth_header.as_str()),
+        ];
+        let url = format!("{}{}", self.api_base_url, path);
+        let host = endpoint_host(self.api_base_url.as_str()).unwrap_or("unknown");
+        log::info!(
+            "channel9 https request: url={}, host={}, sni={}, ca_bundle=esp_crt_bundle_attach, timeout_ms={}",
+            url,
+            host,
+            host,
+            HTTP_TIMEOUT.as_millis()
+        );
+        let http_config = HttpConfiguration {
+            timeout: Some(HTTP_TIMEOUT),
+            crt_bundle_attach: Some(esp_crt_bundle_attach),
+            ..Default::default()
+        };
+        let mut client = HttpClient::wrap(EspHttpConnection::new(&http_config)?);
+        let mut response = client
+            .request(Method::Get, url.as_str(), &headers)
+            .with_context(|| {
+                format!(
+                    "failed to connect to Channel9 HTTPS endpoint {url}; check WiFi IP, DNS, TLS time, and server reachability"
+                )
+            })?
+            .submit()?;
+        let status = response.status();
+        let mut buffer = vec![0_u8; RESPONSE_BUFFER_BYTES];
+        let mut body = Vec::new();
+        loop {
+            let read = response.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            if body.len() + read > MAX_RESPONSE_BYTES {
+                anyhow::bail!("Channel9 response exceeded {MAX_RESPONSE_BYTES} bytes");
+            }
+            body.extend_from_slice(&buffer[..read]);
+        }
+        let body = String::from_utf8_lossy(&body).into_owned();
+        if !(200..300).contains(&status) {
+            anyhow::bail!("Channel9 request failed with HTTP {status}: {body}");
+        }
+        Ok(body)
+    }
+}
+
+impl DeviceMessage {
+    pub fn display_text(&self) -> String {
+        if let Some(object) = self.payload.as_object() {
+            for key in ["suggestion", "title", "message", "text", "body", "content"] {
+                if let Some(value) = object.get(key).and_then(|value| value.as_str()) {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return value.chars().take(64).collect();
+                    }
+                }
+            }
+        }
+        if let Some(value) = self.payload.as_str() {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.chars().take(64).collect();
+            }
+        }
+        self.message_id.clone()
+    }
+
+    pub fn detail_text(&self) -> String {
+        match self.target_interface.as_deref() {
+            Some(interface) if !interface.is_empty() => {
+                format!("{} via {interface}", self.message_id)
+            }
+            _ => self.message_id.clone(),
+        }
+    }
 }
 
 fn default_api_error() -> ApiErrorBody {
@@ -212,6 +339,58 @@ fn trim_base_url(mut value: String) -> String {
         value.pop();
     }
     value
+}
+
+fn device_events_path(device_id: &str, interfaces: &[String], cursor: Option<&str>) -> String {
+    let mut path = format!("/api/v1/channel9/devices/{device_id}/events?limit=32&heartbeat=true");
+    if !interfaces.is_empty() {
+        path.push_str("&interfaces=");
+        path.push_str(interfaces.join(",").as_str());
+    }
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.trim().is_empty()) {
+        path.push_str("&cursor=");
+        path.push_str(cursor.trim());
+    }
+    path
+}
+
+fn parse_sse_events(body: &str) -> DeviceEvents {
+    let mut connected = false;
+    let mut messages = Vec::new();
+    for block in body.split("\n\n") {
+        let mut event_name = "";
+        let mut data = "";
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("event:") {
+                event_name = value.trim();
+            } else if let Some(value) = line.strip_prefix("data:") {
+                data = value.trim();
+            }
+        }
+        match event_name {
+            "heartbeat" => connected = true,
+            "message" => {
+                connected = true;
+                if let Ok(event) = serde_json::from_str::<DeviceEventBody>(data) {
+                    if event.event_type == "message" {
+                        if let (Some(cursor), Some(message)) = (event.cursor, event.message) {
+                            messages.push(DeviceMessage {
+                                cursor,
+                                message_id: message.message_id,
+                                target_interface: message.target.interface,
+                                payload: message.payload,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    DeviceEvents {
+        connected,
+        messages,
+    }
 }
 
 fn non_empty_description(value: &str) -> Option<&str> {
