@@ -42,6 +42,23 @@ pub struct Channel9Wifi {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct WifiConnectTarget {
+    credential: WifiCredential,
+    auth_method: Option<AuthMethod>,
+    channel: Option<u8>,
+}
+
+impl WifiConnectTarget {
+    fn without_hint(credential: WifiCredential) -> Self {
+        Self {
+            credential,
+            auth_method: None,
+            channel: None,
+        }
+    }
+}
+
 impl Channel9Wifi {
     pub fn new(modem: WifiModem<'static>) -> Result<Self> {
         let sys_loop = EspSystemEventLoop::take()?;
@@ -130,7 +147,12 @@ impl Channel9Wifi {
                 log::warn!(
                     "wifi startup scan failed; trying saved networks in config order: {err:?}"
                 );
-                config.credentials.clone()
+                config
+                    .credentials
+                    .iter()
+                    .cloned()
+                    .map(WifiConnectTarget::without_hint)
+                    .collect()
             }
         };
 
@@ -151,6 +173,37 @@ impl Channel9Wifi {
     }
 
     pub fn connect(&mut self, credential: &WifiCredential) -> Result<()> {
+        self.connect_with_hint(credential, None, None)
+    }
+
+    pub fn connect_saved(&mut self, credential: &WifiCredential) -> Result<()> {
+        match self.scan_matching_network(&credential.ssid) {
+            Ok(Some(network)) => self.connect_network(credential, &network),
+            Ok(None) => self.connect(credential),
+            Err(err) => {
+                log::warn!(
+                    "wifi saved scan failed for {}; trying saved credential: {err:?}",
+                    credential.ssid
+                );
+                self.connect(credential)
+            }
+        }
+    }
+
+    pub fn connect_network(
+        &mut self,
+        credential: &WifiCredential,
+        network: &WifiNetwork,
+    ) -> Result<()> {
+        self.connect_with_hint(credential, network.auth_method, Some(network.channel))
+    }
+
+    fn connect_with_hint(
+        &mut self,
+        credential: &WifiCredential,
+        auth_method: Option<AuthMethod>,
+        channel: Option<u8>,
+    ) -> Result<()> {
         self.last_ssid = Some(credential.ssid.clone());
         self.last_error = None;
 
@@ -161,17 +214,13 @@ impl Channel9Wifi {
                 .try_into()
                 .context("wifi ssid is too long")?,
             bssid: None,
-            auth_method: if credential.password.is_empty() {
-                AuthMethod::None
-            } else {
-                AuthMethod::WPA2Personal
-            },
+            auth_method: select_auth_method(credential, auth_method),
             password: credential
                 .password
                 .as_str()
                 .try_into()
                 .context("wifi password is too long")?,
-            channel: None,
+            channel,
             ..Default::default()
         });
 
@@ -198,13 +247,13 @@ impl Channel9Wifi {
     fn saved_credentials_in_scan_order(
         &mut self,
         config: &WifiConfig,
-    ) -> Result<Vec<WifiCredential>> {
+    ) -> Result<Vec<WifiConnectTarget>> {
         let networks = self.scan()?;
         let mut credentials = Vec::new();
         for network in networks {
             if credentials
                 .iter()
-                .any(|credential: &WifiCredential| credential.ssid == network.ssid)
+                .any(|target: &WifiConnectTarget| target.credential.ssid == network.ssid)
             {
                 continue;
             }
@@ -213,19 +262,33 @@ impl Channel9Wifi {
                 .iter()
                 .find(|credential| credential.ssid == network.ssid)
             {
-                credentials.push(credential.clone());
+                credentials.push(WifiConnectTarget {
+                    credential: credential.clone(),
+                    auth_method: network.auth_method,
+                    channel: Some(network.channel),
+                });
             }
         }
         Ok(credentials)
     }
 
-    fn connect_candidates(&mut self, credentials: &[WifiCredential]) -> Result<Option<String>> {
+    fn scan_matching_network(&mut self, ssid: &str) -> Result<Option<WifiNetwork>> {
+        Ok(self
+            .scan()?
+            .into_iter()
+            .find(|network| network.ssid == ssid))
+    }
+
+    fn connect_candidates(&mut self, credentials: &[WifiConnectTarget]) -> Result<Option<String>> {
         let mut last_error = None;
-        for credential in credentials {
-            match self.connect(credential) {
-                Ok(()) => return Ok(Some(credential.ssid.clone())),
+        for target in credentials {
+            match self.connect_with_hint(&target.credential, target.auth_method, target.channel) {
+                Ok(()) => return Ok(Some(target.credential.ssid.clone())),
                 Err(err) => {
-                    log::warn!("wifi auto connect failed for {}: {err:?}", credential.ssid);
+                    log::warn!(
+                        "wifi auto connect failed for {}: {err:?}",
+                        target.credential.ssid
+                    );
                     last_error = Some(err);
                 }
             }
@@ -236,6 +299,17 @@ impl Channel9Wifi {
         } else {
             Ok(None)
         }
+    }
+}
+
+fn select_auth_method(credential: &WifiCredential, auth_method: Option<AuthMethod>) -> AuthMethod {
+    if credential.password.is_empty() {
+        return AuthMethod::None;
+    }
+
+    match auth_method {
+        Some(AuthMethod::None) | None => AuthMethod::WPA2Personal,
+        Some(auth_method) => auth_method,
     }
 }
 

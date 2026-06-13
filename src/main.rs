@@ -521,7 +521,7 @@ fn reduce_screen(
         (Screen::WifiSaved { selected }, InputEvent::Select) => {
             let credential = config.wifi.credentials.get(selected).cloned();
             if let (Some(wifi), Some(credential)) = (wifi, credential) {
-                if let Err(err) = wifi.connect(&credential) {
+                if let Err(err) = wifi.connect_saved(&credential) {
                     log::warn!("wifi saved connect failed: {err:?}");
                 } else if let Err(err) = time.sync_now(&config.time) {
                     log::warn!("sntp sync after wifi connect failed: {err:?}");
@@ -565,13 +565,13 @@ fn reduce_screen(
             let selected_network = scan_results.get(network_index).cloned();
             if let (Some(wifi), Some(network)) = (wifi, selected_network) {
                 let credential = WifiCredential {
-                    ssid: network.ssid,
+                    ssid: network.ssid.clone(),
                     password: password_input.clone(),
                 };
                 upsert_wifi_credential(config, credential.clone());
                 config.wifi.connect_at_startup = true;
                 save_config(board, config);
-                if let Err(err) = wifi.connect(&credential) {
+                if let Err(err) = wifi.connect_network(&credential, &network) {
                     log::warn!("wifi connect failed: {err:?}");
                 } else if let Err(err) = time.sync_now(&config.time) {
                     log::warn!("sntp sync after wifi connect failed: {err:?}");
