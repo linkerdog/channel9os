@@ -1638,7 +1638,14 @@ fn maybe_poll_channel9_sse(
         push.status = StatusChannel9::Off;
         push.consecutive_failures = 0;
         if !channel9_logged_in(config) {
-            *push = Channel9PushState::default();
+            let default_push = Channel9PushState::default();
+            if *push != default_push {
+                *push = default_push;
+                return Channel9SseDrain {
+                    changed: true,
+                    new_messages: 0,
+                };
+            }
         }
         return Channel9SseDrain {
             changed,
@@ -1708,8 +1715,11 @@ fn apply_channel9_sse_messages(
     push.consecutive_failures = 0;
     if messages.is_empty() {
         if push.message_count == 0 {
-            push.detail = "Listening for pushes".to_owned();
-            drain.changed = true;
+            let detail_changed = push.detail != "Listening for pushes";
+            if detail_changed {
+                push.detail = "Listening for pushes".to_owned();
+            }
+            drain.changed = status_changed || detail_changed;
         } else {
             drain.changed = status_changed;
         }
