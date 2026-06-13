@@ -6,7 +6,8 @@ use channel9_core::{AppConfig, WifiCredential};
 use channel9_storage::{ConfigStore, JsonConfigStore, list_directory, littlefs2_probe};
 use channel9_time::{Channel9Time, TimeSyncStatus, format_clock};
 use channel9_ui::{
-    Channel9View, FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
+    Channel9View, FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle,
+    StatusChannel9, StatusWifi,
 };
 use channel9_wifi::{Channel9Wifi, WifiNetwork, WifiStatus};
 use esp_idf_hal::delay::FreeRtos;
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const CHANNEL9_SSE_INTERVAL: Duration = Duration::from_secs(10);
+const CHANNEL9_SSE_FAILURE_THRESHOLD: u8 = 3;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -79,23 +81,25 @@ struct Channel9LoginState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Channel9PushState {
-    online: bool,
+    status: StatusChannel9,
     suggestion: String,
     detail: String,
     message_count: usize,
     last_cursor: Option<String>,
     next_fetch_at: Option<Instant>,
+    consecutive_failures: u8,
 }
 
 impl Default for Channel9PushState {
     fn default() -> Self {
         Self {
-            online: false,
+            status: StatusChannel9::Off,
             suggestion: "No pushes yet".to_owned(),
             detail: "Waiting for push".to_owned(),
             message_count: 0,
             last_cursor: None,
             next_fetch_at: None,
+            consecutive_failures: 0,
         }
     }
 }
@@ -849,7 +853,7 @@ fn render_screen(
         wifi,
         ble,
         config.time.timezone_offset_minutes,
-        channel9_push.online,
+        channel9_push.status,
     );
     match screen {
         Screen::Home => channel9_ui::draw_home_screen(
@@ -1491,7 +1495,7 @@ fn status_bar(
     wifi: Option<&Channel9Wifi>,
     ble: Option<&Channel9Ble>,
     offset_minutes: i32,
-    channel9_online: bool,
+    channel9: StatusChannel9,
 ) -> StatusBar {
     let wifi = match wifi.map(|wifi| wifi.status()) {
         Some(WifiStatus::Connected) => StatusWifi::Connected,
@@ -1508,7 +1512,7 @@ fn status_bar(
     StatusBar {
         wifi,
         ble,
-        channel9_online,
+        channel9,
         hour_minute: format_clock(offset_minutes),
     }
 }
@@ -1588,8 +1592,9 @@ fn maybe_poll_channel9_sse(
     push: &mut Channel9PushState,
 ) -> Channel9SseDrain {
     if !channel9_sse_ready(config, wifi) {
-        let changed = push.online;
-        push.online = false;
+        let changed = push.status != StatusChannel9::Off;
+        push.status = StatusChannel9::Off;
+        push.consecutive_failures = 0;
         if !channel9_logged_in(config) {
             *push = Channel9PushState::default();
         }
@@ -1609,9 +1614,11 @@ fn maybe_poll_channel9_sse(
     push.next_fetch_at = Some(Instant::now() + CHANNEL9_SSE_INTERVAL);
 
     let Some(access_token) = config.channel9.access_token.as_deref() else {
-        push.online = false;
+        let changed = push.status != StatusChannel9::Off;
+        push.status = StatusChannel9::Off;
+        push.consecutive_failures = 0;
         return Channel9SseDrain {
-            changed: true,
+            changed,
             new_messages: 0,
         };
     };
@@ -1624,24 +1631,28 @@ fn maybe_poll_channel9_sse(
     ) {
         Ok(events) => {
             if !events.connected {
-                push.online = false;
-                push.detail = "Channel9 SSE empty response".to_owned();
-                return Channel9SseDrain {
-                    changed: true,
-                    new_messages: 0,
-                };
+                log::warn!("channel9 sse returned no heartbeat or message");
+                return mark_channel9_sse_failure(push);
             }
             apply_channel9_sse_messages(push, events.messages)
         }
         Err(err) => {
-            push.online = false;
-            push.detail = channel9_sse_error_label(&err);
             log::warn!("channel9 sse fetch failed: {err:?}");
-            Channel9SseDrain {
-                changed: true,
-                new_messages: 0,
-            }
+            mark_channel9_sse_failure(push)
         }
+    }
+}
+
+fn mark_channel9_sse_failure(push: &mut Channel9PushState) -> Channel9SseDrain {
+    push.consecutive_failures = push.consecutive_failures.saturating_add(1);
+    if push.consecutive_failures < CHANNEL9_SSE_FAILURE_THRESHOLD {
+        return Channel9SseDrain::default();
+    }
+    let changed = push.status != StatusChannel9::Failed;
+    push.status = StatusChannel9::Failed;
+    Channel9SseDrain {
+        changed,
+        new_messages: 0,
     }
 }
 
@@ -1650,13 +1661,15 @@ fn apply_channel9_sse_messages(
     messages: Vec<DeviceMessage>,
 ) -> Channel9SseDrain {
     let mut drain = Channel9SseDrain::default();
-    push.online = true;
+    let status_changed = push.status != StatusChannel9::Online;
+    push.status = StatusChannel9::Online;
+    push.consecutive_failures = 0;
     if messages.is_empty() {
         if push.message_count == 0 {
             push.detail = "Listening for pushes".to_owned();
             drain.changed = true;
         } else {
-            drain.changed = true;
+            drain.changed = status_changed;
         }
         return drain;
     }
@@ -1676,19 +1689,6 @@ fn channel9_sse_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
         && wifi
             .map(|wifi| wifi.status() == WifiStatus::Connected)
             .unwrap_or(false)
-}
-
-fn channel9_sse_error_label(error: &anyhow::Error) -> String {
-    let detail = error.to_string();
-    if detail.contains("HTTP 401") {
-        "Channel9 token rejected".to_owned()
-    } else if detail.contains("HTTP 403") {
-        "Channel9 device rejected".to_owned()
-    } else if detail.contains("ESP_ERR_HTTP_CONNECT") {
-        "Channel9 SSE connect failed".to_owned()
-    } else {
-        detail.chars().take(64).collect()
-    }
 }
 
 fn visible_setting_items<'a>(items: &[SettingItem<'a>], selected: usize) -> Vec<SettingItem<'a>> {

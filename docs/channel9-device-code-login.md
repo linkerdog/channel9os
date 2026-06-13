@@ -123,7 +123,8 @@ approved response.
 - The current backend returns snapshot SSE responses. The firmware reconnects periodically with the
   last in-memory cursor and updates the home push panel with the latest message.
 - The status bar shows the Channel9 check indicator only after a successful SSE heartbeat or message
-  response.
+  response. Transient SSE failures do not replace the home push text; after repeated failures the
+  Channel9 status-bar indicator changes to a cross.
 - A newly received push message may play a short pager-style notification tone. The firmware skips
   this tone while recording is active.
 
