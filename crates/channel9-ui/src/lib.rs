@@ -169,15 +169,15 @@ where
         .clear(BG)
         .map_err(|err| anyhow::anyhow!("display clear failed: {err:?}"))?;
 
-    draw_shell(display, "", "Channel9", "", status)?;
+    draw_shell(display, "", "", "", status)?;
 
-    Rectangle::new(Point::new(12, 50), Size::new(216, 58))
+    Rectangle::new(Point::new(12, 46), Size::new(216, 62))
         .into_styled(panel_style(false))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("suggestion panel draw failed: {err:?}"))?;
 
-    draw_text(display, "PUSH", Point::new(18, 66), MUTED)?;
-    draw_text(display, view.suggestion, Point::new(18, 82), PRIMARY)?;
+    draw_text(display, "PUSH", Point::new(18, 62), MUTED)?;
+    draw_text(display, view.suggestion, Point::new(18, 80), PRIMARY)?;
     draw_text(display, view.detail, Point::new(18, 98), MUTED)?;
 
     draw_selected_button(display, "CFG", Point::new(190, 111), Size::new(34, 15))?;
