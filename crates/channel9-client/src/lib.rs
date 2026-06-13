@@ -8,6 +8,7 @@ use serde_json::Value;
 
 const RESPONSE_BUFFER_BYTES: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+const HTTP_HEADER_BUFFER_BYTES: usize = 4096;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const USER_AGENT: &str = "channel9os/0.1";
 
@@ -184,6 +185,7 @@ impl Channel9HttpClient {
             HTTP_TIMEOUT.as_millis()
         );
         let http_config = HttpConfiguration {
+            buffer_size: Some(HTTP_HEADER_BUFFER_BYTES),
             timeout: Some(HTTP_TIMEOUT),
             crt_bundle_attach: Some(esp_crt_bundle_attach),
             ..Default::default()
@@ -247,6 +249,7 @@ impl Channel9HttpClient {
             HTTP_TIMEOUT.as_millis()
         );
         let http_config = HttpConfiguration {
+            buffer_size: Some(HTTP_HEADER_BUFFER_BYTES),
             timeout: Some(HTTP_TIMEOUT),
             crt_bundle_attach: Some(esp_crt_bundle_attach),
             ..Default::default()
