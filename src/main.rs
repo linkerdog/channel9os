@@ -6,21 +6,20 @@ use channel9_core::{AppConfig, WifiCredential};
 use channel9_storage::{ConfigStore, JsonConfigStore, list_directory, littlefs2_probe};
 use channel9_time::{Channel9Time, TimeSyncStatus, format_clock};
 use channel9_ui::{
-    Channel9View, FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle, StatusWifi,
+    Channel9View, FileListItem, HomeView, MenuItem, SettingItem, StatusBar, StatusBle,
+    StatusChannel9, StatusWifi,
 };
 use channel9_wifi::{Channel9Wifi, WifiNetwork, WifiStatus};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const UI_CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
-const CHANNEL9_SSE_WORKER_STACK_BYTES: usize = 12288;
 const CHANNEL9_SSE_INTERVAL: Duration = Duration::from_secs(10);
+const CHANNEL9_SSE_FAILURE_THRESHOLD: u8 = 3;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -42,6 +41,7 @@ fn main() {
 enum Screen {
     Home,
     Config { selected: usize },
+    Messages,
     Wifi { selected: usize },
     WifiSaved { selected: usize },
     WifiScan { selected: usize },
@@ -82,51 +82,33 @@ struct Channel9LoginState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Channel9PushState {
-    online: bool,
+    status: StatusChannel9,
     suggestion: String,
     detail: String,
     message_count: usize,
     last_cursor: Option<String>,
+    next_fetch_at: Option<Instant>,
+    consecutive_failures: u8,
 }
 
 impl Default for Channel9PushState {
     fn default() -> Self {
         Self {
-            online: false,
+            status: StatusChannel9::Off,
             suggestion: "No pushes yet".to_owned(),
-            detail: "Connect Channel9 to receive pushes".to_owned(),
+            detail: "Waiting for push".to_owned(),
             message_count: 0,
             last_cursor: None,
+            next_fetch_at: None,
+            consecutive_failures: 0,
         }
     }
-}
-
-#[derive(Debug)]
-struct Channel9SseWorker {
-    key: String,
-    stop: Arc<AtomicBool>,
-    receiver: Receiver<Channel9SseUpdate>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-#[derive(Debug)]
-enum Channel9SseUpdate {
-    Connected,
-    Messages(Vec<DeviceMessage>),
-    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Channel9SseDrain {
     changed: bool,
     new_messages: usize,
-}
-
-impl Drop for Channel9SseWorker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.handle.take();
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +140,6 @@ fn run_display() -> Result<()> {
     let mut channel9_input = String::new();
     let mut channel9_login = Channel9LoginState::default();
     let mut channel9_push = Channel9PushState::default();
-    let mut channel9_sse_worker: Option<Channel9SseWorker> = None;
     let mut recorder_message = heapless::String::<64>::new();
     let (ui_events_tx, ui_events_rx) = sync_channel::<UiEvent>(4);
     let _ui_scheduler_task = spawn_ui_scheduler(ui_events_tx)?;
@@ -393,13 +374,7 @@ fn run_display() -> Result<()> {
             )?;
         }
 
-        maintain_channel9_sse_worker(
-            wifi.as_ref(),
-            &config,
-            &mut channel9_push,
-            &mut channel9_sse_worker,
-        );
-        let sse_update = drain_channel9_sse_updates(&mut channel9_push, &channel9_sse_worker);
+        let sse_update = maybe_poll_channel9_sse(wifi.as_ref(), &config, &mut channel9_push);
         if sse_update.new_messages > 0 && screen != Screen::Recording {
             if let Err(err) = board.play_pager_beep() {
                 log::warn!("channel9 pager beep failed: {err:?}");
@@ -471,20 +446,22 @@ fn reduce_screen(
             selected: (selected + 1) % CONFIG_ITEMS.len(),
         },
         (Screen::Config { selected }, InputEvent::Select) => match selected {
-            0 => Screen::Wifi { selected: 0 },
-            1 => Screen::Storage { selected: 0 },
-            2 => Screen::Device,
-            3 => Screen::Files,
-            4 => Screen::Time { selected: 0 },
-            5 => Screen::Audio { selected: 0 },
-            6 => {
+            0 => Screen::Messages,
+            1 => Screen::Wifi { selected: 0 },
+            2 => Screen::Storage { selected: 0 },
+            3 => Screen::Device,
+            4 => Screen::Files,
+            5 => Screen::Time { selected: 0 },
+            6 => Screen::Audio { selected: 0 },
+            7 => {
                 ensure_channel9_device_id(board, config);
                 Screen::Channel9 { selected: 0 }
             }
-            7 => Screen::Recorder { selected: 0 },
+            8 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
-        (Screen::Wifi { .. }, InputEvent::Back) => Screen::Config { selected: 0 },
+        (Screen::Messages, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 0 },
+        (Screen::Wifi { .. }, InputEvent::Back) => Screen::Config { selected: 1 },
         (Screen::Wifi { selected }, InputEvent::Up | InputEvent::Left) => Screen::Wifi {
             selected: selected.saturating_sub(1),
         },
@@ -493,7 +470,7 @@ fn reduce_screen(
         },
         (Screen::Wifi { selected }, InputEvent::Select) => {
             if selected == 4 {
-                return Screen::Config { selected: 0 };
+                return Screen::Config { selected: 1 };
             }
             if selected == 1 {
                 return Screen::WifiResult;
@@ -544,7 +521,7 @@ fn reduce_screen(
         (Screen::WifiSaved { selected }, InputEvent::Select) => {
             let credential = config.wifi.credentials.get(selected).cloned();
             if let (Some(wifi), Some(credential)) = (wifi, credential) {
-                if let Err(err) = wifi.connect(&credential) {
+                if let Err(err) = wifi.connect_saved(&credential) {
                     log::warn!("wifi saved connect failed: {err:?}");
                 } else if let Err(err) = time.sync_now(&config.time) {
                     log::warn!("sntp sync after wifi connect failed: {err:?}");
@@ -588,13 +565,13 @@ fn reduce_screen(
             let selected_network = scan_results.get(network_index).cloned();
             if let (Some(wifi), Some(network)) = (wifi, selected_network) {
                 let credential = WifiCredential {
-                    ssid: network.ssid,
+                    ssid: network.ssid.clone(),
                     password: password_input.clone(),
                 };
                 upsert_wifi_credential(config, credential.clone());
                 config.wifi.connect_at_startup = true;
                 save_config(board, config);
-                if let Err(err) = wifi.connect(&credential) {
+                if let Err(err) = wifi.connect_network(&credential, &network) {
                     log::warn!("wifi connect failed: {err:?}");
                 } else if let Err(err) = time.sync_now(&config.time) {
                     log::warn!("sntp sync after wifi connect failed: {err:?}");
@@ -605,7 +582,7 @@ fn reduce_screen(
                 Screen::Wifi { selected: 2 }
             }
         }
-        (Screen::Storage { .. }, InputEvent::Back) => Screen::Config { selected: 1 },
+        (Screen::Storage { .. }, InputEvent::Back) => Screen::Config { selected: 2 },
         (Screen::Storage { selected }, InputEvent::Up | InputEvent::Left) => Screen::Storage {
             selected: selected.saturating_sub(1),
         },
@@ -616,14 +593,14 @@ fn reduce_screen(
             match selected {
                 0 => apply_storage_setting(board, config, selected),
                 2 if board.sdcard_mounted() => return Screen::Files,
-                3 => return Screen::Config { selected: 1 },
+                3 => return Screen::Config { selected: 2 },
                 _ => {}
             }
             Screen::Storage { selected }
         }
-        (Screen::Device, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 2 },
-        (Screen::Files, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 3 },
-        (Screen::Time { .. }, InputEvent::Back) => Screen::Config { selected: 4 },
+        (Screen::Device, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 3 },
+        (Screen::Files, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 4 },
+        (Screen::Time { .. }, InputEvent::Back) => Screen::Config { selected: 5 },
         (Screen::Time { selected }, InputEvent::Up | InputEvent::Left) => Screen::Time {
             selected: selected.saturating_sub(1),
         },
@@ -656,14 +633,14 @@ fn reduce_screen(
                         log::warn!("manual sntp sync failed: {err:?}");
                     }
                 }
-                4 => return Screen::Config { selected: 4 },
+                4 => return Screen::Config { selected: 5 },
                 _ => {}
             }
             Screen::Time { selected }
         }
         (Screen::Audio { .. }, InputEvent::Back) => {
             save_config(board, config);
-            Screen::Config { selected: 5 }
+            Screen::Config { selected: 6 }
         }
         (Screen::Audio { selected }, InputEvent::Up) => Screen::Audio {
             selected: selected.saturating_sub(1),
@@ -681,12 +658,12 @@ fn reduce_screen(
         }
         (Screen::Audio { selected: 1 }, InputEvent::Select) => {
             save_config(board, config);
-            Screen::Config { selected: 5 }
+            Screen::Config { selected: 6 }
         }
         (Screen::Audio { selected }, _) => Screen::Audio { selected },
         (Screen::Channel9 { .. }, InputEvent::Back) => {
             cancel_channel9_logout_confirm(channel9_login);
-            Screen::Config { selected: 6 }
+            Screen::Config { selected: 7 }
         }
         (Screen::Channel9 { selected }, InputEvent::Up | InputEvent::Left) => {
             cancel_channel9_logout_confirm(channel9_login);
@@ -722,7 +699,7 @@ fn reduce_screen(
                     }
                     6 => {
                         cancel_channel9_logout_confirm(channel9_login);
-                        return Screen::Config { selected: 6 };
+                        return Screen::Config { selected: 7 };
                     }
                     _ => {
                         cancel_channel9_logout_confirm(channel9_login);
@@ -751,7 +728,7 @@ fn reduce_screen(
                         channel9_login.pending_request = Some(Channel9LoginRequest::Create);
                         channel9_login.message = "Refreshing...".to_owned();
                     }
-                    (false, 2) | (true, 3) => return Screen::Config { selected: 6 },
+                    (false, 2) | (true, 3) => return Screen::Config { selected: 7 },
                     _ => {}
                 }
             }
@@ -782,7 +759,7 @@ fn reduce_screen(
             channel9_login.message = "Press Refresh".to_owned();
             Screen::Channel9 { selected: 0 }
         }
-        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 7 },
+        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 8 },
         (Screen::Recorder { selected }, InputEvent::Up | InputEvent::Left) => Screen::Recorder {
             selected: selected.saturating_sub(1),
         },
@@ -822,7 +799,7 @@ fn reduce_screen(
 }
 
 const CONFIG_ITEMS: &[&str] = &[
-    "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Channel9", "Recorder",
+    "Messages", "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Channel9", "Recorder",
 ];
 const WIFI_ITEMS: &[&str] = &[
     "Auto Connect",
@@ -879,7 +856,7 @@ fn render_screen(
         wifi,
         ble,
         config.time.timezone_offset_minutes,
-        channel9_push.online,
+        channel9_push.status,
     );
     match screen {
         Screen::Home => channel9_ui::draw_home_screen(
@@ -905,7 +882,40 @@ fn render_screen(
                 "",
                 "",
                 &items,
-                "SEL: Open  ESC: Back",
+                "ENTER: Open  ESC: Home",
+                status_bar,
+            )
+        }
+        Screen::Messages => {
+            let suggestion = truncate_runtime_label(channel9_push.suggestion.as_str());
+            let detail = truncate_runtime_label(channel9_push.detail.as_str());
+            let count = count_label(channel9_push.message_count);
+            let items = [
+                SettingItem {
+                    label: "Latest",
+                    value: suggestion.as_str(),
+                    selected: false,
+                    enabled: true,
+                },
+                SettingItem {
+                    label: "Status",
+                    value: detail.as_str(),
+                    selected: false,
+                    enabled: true,
+                },
+                SettingItem {
+                    label: "Count",
+                    value: count.as_str(),
+                    selected: false,
+                    enabled: true,
+                },
+            ];
+            channel9_ui::draw_settings_screen(
+                board.display_mut(),
+                "MESSAGES",
+                "Channel9 inbox",
+                &items,
+                "ENTER/ESC: Back",
                 status_bar,
             )
         }
@@ -1500,6 +1510,12 @@ fn percent_label(percent: u8) -> heapless::String<8> {
     value
 }
 
+fn count_label(count: usize) -> heapless::String<16> {
+    let mut value = heapless::String::<16>::new();
+    let _ = core::fmt::write(&mut value, format_args!("{count}"));
+    value
+}
+
 fn next_sntp_server(current: &str) -> String {
     let next = SNTP_SERVERS
         .iter()
@@ -1521,7 +1537,7 @@ fn status_bar(
     wifi: Option<&Channel9Wifi>,
     ble: Option<&Channel9Ble>,
     offset_minutes: i32,
-    channel9_online: bool,
+    channel9: StatusChannel9,
 ) -> StatusBar {
     let wifi = match wifi.map(|wifi| wifi.status()) {
         Some(WifiStatus::Connected) => StatusWifi::Connected,
@@ -1538,7 +1554,7 @@ fn status_bar(
     StatusBar {
         wifi,
         ble,
-        channel9_online,
+        channel9,
         hour_minute: format_clock(offset_minutes),
     }
 }
@@ -1612,151 +1628,112 @@ fn drain_ui_events(
     }
 }
 
-fn maintain_channel9_sse_worker(
+fn maybe_poll_channel9_sse(
     wifi: Option<&Channel9Wifi>,
     config: &AppConfig,
     push: &mut Channel9PushState,
-    worker: &mut Option<Channel9SseWorker>,
-) {
+) -> Channel9SseDrain {
     if !channel9_sse_ready(config, wifi) {
-        if let Some(worker) = worker.take() {
-            worker.stop.store(true, Ordering::Relaxed);
-        }
-        push.online = false;
+        let changed = push.status != StatusChannel9::Off;
+        push.status = StatusChannel9::Off;
+        push.consecutive_failures = 0;
         if !channel9_logged_in(config) {
-            *push = Channel9PushState::default();
+            let default_push = Channel9PushState::default();
+            if *push != default_push {
+                *push = default_push;
+                return Channel9SseDrain {
+                    changed: true,
+                    new_messages: 0,
+                };
+            }
         }
-        return;
+        return Channel9SseDrain {
+            changed,
+            new_messages: 0,
+        };
     }
 
-    let Some(key) = channel9_sse_key(config) else {
-        return;
+    let should_poll = push
+        .next_fetch_at
+        .map(|next_fetch_at| Instant::now() >= next_fetch_at)
+        .unwrap_or(true);
+    if !should_poll {
+        return Channel9SseDrain::default();
+    }
+    push.next_fetch_at = Some(Instant::now() + CHANNEL9_SSE_INTERVAL);
+
+    let Some(access_token) = config.channel9.access_token.as_deref() else {
+        let changed = push.status != StatusChannel9::Off;
+        push.status = StatusChannel9::Off;
+        push.consecutive_failures = 0;
+        return Channel9SseDrain {
+            changed,
+            new_messages: 0,
+        };
     };
-    if worker.as_ref().is_some_and(|worker| worker.key == key) {
-        return;
-    }
-    if let Some(worker) = worker.take() {
-        worker.stop.store(true, Ordering::Relaxed);
-    }
-    match spawn_channel9_sse_worker(config, push.last_cursor.clone(), key) {
-        Ok(next_worker) => {
-            *worker = Some(next_worker);
+    let client = Channel9HttpClient::new(channel9_api_base_url(config));
+    match client.open_device_events(
+        config.channel9.device_id.as_str(),
+        access_token,
+        &config.channel9.interfaces,
+        push.last_cursor.as_deref(),
+    ) {
+        Ok(events) => {
+            if !events.connected {
+                log::warn!("channel9 sse returned no heartbeat or message");
+                return mark_channel9_sse_failure(push);
+            }
+            apply_channel9_sse_messages(push, events.messages)
         }
         Err(err) => {
-            push.online = false;
-            push.detail = format!("SSE start failed: {err:?}");
-            log::warn!("channel9 sse worker start failed: {err:?}");
+            log::warn!("channel9 sse fetch failed: {err:?}");
+            mark_channel9_sse_failure(push)
         }
     }
 }
 
-fn spawn_channel9_sse_worker(
-    config: &AppConfig,
-    cursor: Option<String>,
-    key: String,
-) -> Result<Channel9SseWorker> {
-    let api_base_url = channel9_api_base_url(config).to_owned();
-    let device_id = config.channel9.device_id.clone();
-    let access_token = config.channel9.access_token.clone().unwrap_or_default();
-    let interfaces = config.channel9.interfaces.clone();
-    let stop = Arc::new(AtomicBool::new(false));
-    let worker_stop = stop.clone();
-    let (sender, receiver) = sync_channel::<Channel9SseUpdate>(4);
-    let handle = thread::Builder::new()
-        .name("channel9-sse".to_owned())
-        .stack_size(CHANNEL9_SSE_WORKER_STACK_BYTES)
-        .spawn(move || {
-            let client = Channel9HttpClient::new(api_base_url);
-            let mut cursor = cursor;
-            while !worker_stop.load(Ordering::Relaxed) {
-                match client.open_device_events(
-                    device_id.as_str(),
-                    access_token.as_str(),
-                    &interfaces,
-                    cursor.as_deref(),
-                ) {
-                    Ok(events) => {
-                        if let Some(message) = events.messages.last() {
-                            cursor = Some(message.cursor.clone());
-                        }
-                        let update = if !events.connected {
-                            Channel9SseUpdate::Failed("Channel9 SSE empty response".to_owned())
-                        } else if events.messages.is_empty() {
-                            Channel9SseUpdate::Connected
-                        } else {
-                            Channel9SseUpdate::Messages(events.messages)
-                        };
-                        match sender.try_send(update) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
-                    Err(err) => {
-                        let message = channel9_sse_error_label(&err);
-                        log::warn!("channel9 sse fetch failed: {err:?}");
-                        match sender.try_send(Channel9SseUpdate::Failed(message)) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
-                }
-                let mut slept = Duration::ZERO;
-                while slept < CHANNEL9_SSE_INTERVAL && !worker_stop.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
-                    slept += Duration::from_millis(100);
-                }
-            }
-        })
-        .map_err(|err| anyhow::anyhow!("failed to spawn channel9 sse task: {err:?}"))?;
-    Ok(Channel9SseWorker {
-        key,
-        stop,
-        receiver,
-        handle: Some(handle),
-    })
-}
-
-fn drain_channel9_sse_updates(
-    push: &mut Channel9PushState,
-    worker: &Option<Channel9SseWorker>,
-) -> Channel9SseDrain {
-    let Some(worker) = worker.as_ref() else {
+fn mark_channel9_sse_failure(push: &mut Channel9PushState) -> Channel9SseDrain {
+    push.consecutive_failures = push.consecutive_failures.saturating_add(1);
+    if push.consecutive_failures < CHANNEL9_SSE_FAILURE_THRESHOLD {
         return Channel9SseDrain::default();
-    };
-    let mut drain = Channel9SseDrain::default();
-    loop {
-        match worker.receiver.try_recv() {
-            Ok(Channel9SseUpdate::Connected) => {
-                push.online = true;
-                if push.message_count == 0 {
-                    push.detail = "Listening for pushes".to_owned();
-                }
-                drain.changed = true;
-            }
-            Ok(Channel9SseUpdate::Messages(messages)) => {
-                push.online = true;
-                for message in messages {
-                    drain.new_messages = drain.new_messages.saturating_add(1);
-                    push.message_count = push.message_count.saturating_add(1);
-                    push.last_cursor = Some(message.cursor.clone());
-                    push.suggestion = message.display_text();
-                    push.detail = message.detail_text();
-                }
-                drain.changed = true;
-            }
-            Ok(Channel9SseUpdate::Failed(message)) => {
-                push.online = false;
-                push.detail = message;
-                drain.changed = true;
-            }
-            Err(TryRecvError::Empty) => return drain,
-            Err(TryRecvError::Disconnected) => {
-                push.online = false;
-                drain.changed = true;
-                return drain;
-            }
-        }
     }
+    let changed = push.status != StatusChannel9::Failed;
+    push.status = StatusChannel9::Failed;
+    Channel9SseDrain {
+        changed,
+        new_messages: 0,
+    }
+}
+
+fn apply_channel9_sse_messages(
+    push: &mut Channel9PushState,
+    messages: Vec<DeviceMessage>,
+) -> Channel9SseDrain {
+    let mut drain = Channel9SseDrain::default();
+    let status_changed = push.status != StatusChannel9::Online;
+    push.status = StatusChannel9::Online;
+    push.consecutive_failures = 0;
+    if messages.is_empty() {
+        if push.message_count == 0 {
+            let detail_changed = push.detail != "Listening for pushes";
+            if detail_changed {
+                push.detail = "Listening for pushes".to_owned();
+            }
+            drain.changed = status_changed || detail_changed;
+        } else {
+            drain.changed = status_changed;
+        }
+        return drain;
+    }
+    for message in messages {
+        drain.new_messages = drain.new_messages.saturating_add(1);
+        push.message_count = push.message_count.saturating_add(1);
+        push.last_cursor = Some(message.cursor.clone());
+        push.suggestion = message.display_text();
+        push.detail = message.detail_text();
+    }
+    drain.changed = true;
+    drain
 }
 
 fn channel9_sse_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
@@ -1764,31 +1741,6 @@ fn channel9_sse_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
         && wifi
             .map(|wifi| wifi.status() == WifiStatus::Connected)
             .unwrap_or(false)
-}
-
-fn channel9_sse_key(config: &AppConfig) -> Option<String> {
-    let token = config.channel9.access_token.as_ref()?;
-    Some(format!(
-        "{}:{}:{}:{}:{}",
-        channel9_api_base_url(config),
-        config.channel9.device_id,
-        config.channel9.token_expires_at.unwrap_or_default(),
-        token.len(),
-        config.channel9.interfaces.join(",")
-    ))
-}
-
-fn channel9_sse_error_label(error: &anyhow::Error) -> String {
-    let detail = error.to_string();
-    if detail.contains("HTTP 401") {
-        "Channel9 token rejected".to_owned()
-    } else if detail.contains("HTTP 403") {
-        "Channel9 device rejected".to_owned()
-    } else if detail.contains("ESP_ERR_HTTP_CONNECT") {
-        "Channel9 SSE connect failed".to_owned()
-    } else {
-        detail.chars().take(64).collect()
-    }
 }
 
 fn visible_setting_items<'a>(items: &[SettingItem<'a>], selected: usize) -> Vec<SettingItem<'a>> {

@@ -47,7 +47,7 @@ pub struct HomeView<'a> {
 pub struct StatusBar {
     pub wifi: StatusWifi,
     pub ble: StatusBle,
-    pub channel9_online: bool,
+    pub channel9: StatusChannel9,
     pub hour_minute: heapless::String<6>,
 }
 
@@ -64,6 +64,13 @@ pub enum StatusBle {
     Off,
     Ready,
     Advertising,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusChannel9 {
+    Off,
+    Online,
     Failed,
 }
 
@@ -162,17 +169,18 @@ where
         .clear(BG)
         .map_err(|err| anyhow::anyhow!("display clear failed: {err:?}"))?;
 
-    draw_shell(display, "", "Push suggestions", "Enter: Config", status)?;
+    draw_shell(display, "", "", "", status)?;
 
-    Rectangle::new(Point::new(12, 54), Size::new(216, 48))
+    Rectangle::new(Point::new(12, 46), Size::new(216, 62))
         .into_styled(panel_style(false))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("suggestion panel draw failed: {err:?}"))?;
 
-    draw_text(display, view.suggestion, Point::new(18, 72), PRIMARY)?;
-    draw_text(display, view.detail, Point::new(18, 88), MUTED)?;
+    draw_text(display, "PUSH", Point::new(18, 62), MUTED)?;
+    draw_text(display, view.suggestion, Point::new(18, 80), PRIMARY)?;
+    draw_text(display, view.detail, Point::new(18, 98), MUTED)?;
 
-    draw_selected_button(display, "CONFIG", Point::new(158, 105), Size::new(62, 17))?;
+    draw_selected_button(display, "MENU", Point::new(184, 111), Size::new(40, 15))?;
 
     Ok(())
 }
@@ -195,7 +203,7 @@ where
     draw_menu_shell(display, footer, status)?;
 
     if items.is_empty() {
-        draw_text(display, "No config items", Point::new(18, 82), MUTED)?;
+        draw_text(display, "No functions", Point::new(18, 82), MUTED)?;
         return Ok(());
     }
 
@@ -504,7 +512,7 @@ where
     )?;
     draw_status_wifi_icon(display, Point::new(147, 6), status.wifi)?;
     draw_status_ble_icon(display, Point::new(176, 7), status.ble)?;
-    draw_status_channel9_icon(display, Point::new(128, 8), status.channel9_online)?;
+    draw_status_channel9_icon(display, Point::new(128, 8), status.channel9)?;
     draw_battery(display, Point::new(199, 8), 72)?;
 
     if !title.is_empty() {
@@ -550,7 +558,7 @@ where
     )?;
     draw_status_wifi_icon(display, Point::new(147, 6), status.wifi)?;
     draw_status_ble_icon(display, Point::new(176, 7), status.ble)?;
-    draw_status_channel9_icon(display, Point::new(128, 8), status.channel9_online)?;
+    draw_status_channel9_icon(display, Point::new(128, 8), status.channel9)?;
     draw_battery(display, Point::new(199, 8), 72)?;
     draw_text(display, footer, Point::new(12, 128), MUTED)
 }
@@ -788,21 +796,25 @@ where
     Ok(())
 }
 
-fn draw_status_channel9_icon<D>(display: &mut D, origin: Point, online: bool) -> Result<()>
+fn draw_status_channel9_icon<D>(
+    display: &mut D,
+    origin: Point,
+    status: StatusChannel9,
+) -> Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
     D::Error: core::fmt::Debug,
 {
-    let color = if online {
-        WHITE
-    } else {
-        Rgb565::new(8, 24, 18)
+    let color = match status {
+        StatusChannel9::Online => WHITE,
+        StatusChannel9::Failed => OPERATION,
+        StatusChannel9::Off => Rgb565::new(8, 24, 18),
     };
     Circle::new(Point::new(origin.x, origin.y), 13)
         .into_styled(PrimitiveStyle::with_stroke(color, 1))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("status channel9 icon draw failed: {err:?}"))?;
-    if online {
+    if status == StatusChannel9::Online {
         Line::new(
             Point::new(origin.x + 3, origin.y + 7),
             Point::new(origin.x + 6, origin.y + 10),
@@ -817,6 +829,21 @@ where
         .into_styled(PrimitiveStyle::with_stroke(color, 2))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("status channel9 check draw failed: {err:?}"))?;
+    } else if status == StatusChannel9::Failed {
+        Line::new(
+            Point::new(origin.x + 4, origin.y + 4),
+            Point::new(origin.x + 11, origin.y + 11),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("status channel9 fail draw failed: {err:?}"))?;
+        Line::new(
+            Point::new(origin.x + 11, origin.y + 4),
+            Point::new(origin.x + 4, origin.y + 11),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(color, 2))
+        .draw(display)
+        .map_err(|err| anyhow::anyhow!("status channel9 fail draw failed: {err:?}"))?;
     }
     Ok(())
 }
@@ -1191,10 +1218,12 @@ where
         )
         .draw(display)
         .map_err(|err| anyhow::anyhow!("button border draw failed: {err:?}"))?;
-    draw_text(
+    draw_centered_small_text_in(
         display,
         text,
-        Point::new(origin.x + 6, origin.y + 11),
+        origin.x,
+        size.width as i32,
+        origin.y + 11,
         WHITE,
     )
 }

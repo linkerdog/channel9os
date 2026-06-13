@@ -130,3 +130,7 @@ border, centered title, current path, `>` selected row, colored folders, file si
 - The Cardputer-Adv LCD path follows the Rust `cardputer` reference implementation: SPI2 host, SPI mode 3, 80 MHz write clock, ST7789 inversion enabled, 240 x 135 display size, `(40, 53)` window offset, and LEDC PWM backlight on GPIO38.
 - `littlefs2` is currently integrated as a compile-time storage probe. The active SD card filesystem remains ESP-IDF FATFS because `littlefs2` requires a dedicated block-device implementation.
 - `sdkconfig.defaults` raises `CONFIG_ESP_MAIN_TASK_STACK_SIZE` to avoid stack overflow while initializing the display from Rust.
+
+## TODO
+
+- Move Channel9 HTTPS work to a single serialized network worker so device-code login, token polling, and SSE polling do not block the UI loop while still avoiding concurrent lwIP/mbedTLS access on ESP32-S3.

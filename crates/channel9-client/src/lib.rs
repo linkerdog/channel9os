@@ -8,6 +8,7 @@ use serde_json::Value;
 
 const RESPONSE_BUFFER_BYTES: usize = 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+const HTTP_HEADER_BUFFER_BYTES: usize = 4096;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const USER_AGENT: &str = "channel9os/0.1";
 
@@ -184,6 +185,7 @@ impl Channel9HttpClient {
             HTTP_TIMEOUT.as_millis()
         );
         let http_config = HttpConfiguration {
+            buffer_size: Some(HTTP_HEADER_BUFFER_BYTES),
             timeout: Some(HTTP_TIMEOUT),
             crt_bundle_attach: Some(esp_crt_bundle_attach),
             ..Default::default()
@@ -247,6 +249,7 @@ impl Channel9HttpClient {
             HTTP_TIMEOUT.as_millis()
         );
         let http_config = HttpConfiguration {
+            buffer_size: Some(HTTP_HEADER_BUFFER_BYTES),
             timeout: Some(HTTP_TIMEOUT),
             crt_bundle_attach: Some(esp_crt_bundle_attach),
             ..Default::default()
@@ -299,15 +302,13 @@ impl DeviceMessage {
                 return value.chars().take(64).collect();
             }
         }
-        self.message_id.clone()
+        "New push".to_owned()
     }
 
     pub fn detail_text(&self) -> String {
         match self.target_interface.as_deref() {
-            Some(interface) if !interface.is_empty() => {
-                format!("{} via {interface}", self.message_id)
-            }
-            _ => self.message_id.clone(),
+            Some(interface) if !interface.is_empty() => format!("{interface} push received"),
+            _ => "Push received".to_owned(),
         }
     }
 }
