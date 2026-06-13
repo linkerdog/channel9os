@@ -92,7 +92,7 @@ impl Default for Channel9PushState {
         Self {
             online: false,
             suggestion: "No pushes yet".to_owned(),
-            detail: "Connect Channel9 to receive pushes".to_owned(),
+            detail: "Waiting for push".to_owned(),
             message_count: 0,
             last_cursor: None,
             next_fetch_at: None,

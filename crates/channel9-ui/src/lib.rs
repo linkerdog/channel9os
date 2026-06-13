@@ -162,17 +162,18 @@ where
         .clear(BG)
         .map_err(|err| anyhow::anyhow!("display clear failed: {err:?}"))?;
 
-    draw_shell(display, "", "Push suggestions", "Enter: Config", status)?;
+    draw_shell(display, "", "Channel9", "", status)?;
 
-    Rectangle::new(Point::new(12, 54), Size::new(216, 48))
+    Rectangle::new(Point::new(12, 50), Size::new(216, 58))
         .into_styled(panel_style(false))
         .draw(display)
         .map_err(|err| anyhow::anyhow!("suggestion panel draw failed: {err:?}"))?;
 
-    draw_text(display, view.suggestion, Point::new(18, 72), PRIMARY)?;
-    draw_text(display, view.detail, Point::new(18, 88), MUTED)?;
+    draw_text(display, "PUSH", Point::new(18, 66), MUTED)?;
+    draw_text(display, view.suggestion, Point::new(18, 82), PRIMARY)?;
+    draw_text(display, view.detail, Point::new(18, 98), MUTED)?;
 
-    draw_selected_button(display, "CONFIG", Point::new(158, 105), Size::new(62, 17))?;
+    draw_selected_button(display, "CFG", Point::new(190, 111), Size::new(34, 15))?;
 
     Ok(())
 }
@@ -1191,10 +1192,12 @@ where
         )
         .draw(display)
         .map_err(|err| anyhow::anyhow!("button border draw failed: {err:?}"))?;
-    draw_text(
+    draw_centered_small_text_in(
         display,
         text,
-        Point::new(origin.x + 6, origin.y + 11),
+        origin.x,
+        size.width as i32,
+        origin.y + 11,
         WHITE,
     )
 }

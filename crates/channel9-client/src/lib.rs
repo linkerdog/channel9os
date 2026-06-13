@@ -299,15 +299,13 @@ impl DeviceMessage {
                 return value.chars().take(64).collect();
             }
         }
-        self.message_id.clone()
+        "New push".to_owned()
     }
 
     pub fn detail_text(&self) -> String {
         match self.target_interface.as_deref() {
-            Some(interface) if !interface.is_empty() => {
-                format!("{} via {interface}", self.message_id)
-            }
-            _ => self.message_id.clone(),
+            Some(interface) if !interface.is_empty() => format!("{interface} push received"),
+            _ => "Push received".to_owned(),
         }
     }
 }
