@@ -41,6 +41,7 @@ fn main() {
 enum Screen {
     Home,
     Config { selected: usize },
+    Messages,
     Wifi { selected: usize },
     WifiSaved { selected: usize },
     WifiScan { selected: usize },
@@ -445,20 +446,22 @@ fn reduce_screen(
             selected: (selected + 1) % CONFIG_ITEMS.len(),
         },
         (Screen::Config { selected }, InputEvent::Select) => match selected {
-            0 => Screen::Wifi { selected: 0 },
-            1 => Screen::Storage { selected: 0 },
-            2 => Screen::Device,
-            3 => Screen::Files,
-            4 => Screen::Time { selected: 0 },
-            5 => Screen::Audio { selected: 0 },
-            6 => {
+            0 => Screen::Messages,
+            1 => Screen::Wifi { selected: 0 },
+            2 => Screen::Storage { selected: 0 },
+            3 => Screen::Device,
+            4 => Screen::Files,
+            5 => Screen::Time { selected: 0 },
+            6 => Screen::Audio { selected: 0 },
+            7 => {
                 ensure_channel9_device_id(board, config);
                 Screen::Channel9 { selected: 0 }
             }
-            7 => Screen::Recorder { selected: 0 },
+            8 => Screen::Recorder { selected: 0 },
             _ => Screen::Config { selected },
         },
-        (Screen::Wifi { .. }, InputEvent::Back) => Screen::Config { selected: 0 },
+        (Screen::Messages, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 0 },
+        (Screen::Wifi { .. }, InputEvent::Back) => Screen::Config { selected: 1 },
         (Screen::Wifi { selected }, InputEvent::Up | InputEvent::Left) => Screen::Wifi {
             selected: selected.saturating_sub(1),
         },
@@ -467,7 +470,7 @@ fn reduce_screen(
         },
         (Screen::Wifi { selected }, InputEvent::Select) => {
             if selected == 4 {
-                return Screen::Config { selected: 0 };
+                return Screen::Config { selected: 1 };
             }
             if selected == 1 {
                 return Screen::WifiResult;
@@ -579,7 +582,7 @@ fn reduce_screen(
                 Screen::Wifi { selected: 2 }
             }
         }
-        (Screen::Storage { .. }, InputEvent::Back) => Screen::Config { selected: 1 },
+        (Screen::Storage { .. }, InputEvent::Back) => Screen::Config { selected: 2 },
         (Screen::Storage { selected }, InputEvent::Up | InputEvent::Left) => Screen::Storage {
             selected: selected.saturating_sub(1),
         },
@@ -590,14 +593,14 @@ fn reduce_screen(
             match selected {
                 0 => apply_storage_setting(board, config, selected),
                 2 if board.sdcard_mounted() => return Screen::Files,
-                3 => return Screen::Config { selected: 1 },
+                3 => return Screen::Config { selected: 2 },
                 _ => {}
             }
             Screen::Storage { selected }
         }
-        (Screen::Device, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 2 },
-        (Screen::Files, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 3 },
-        (Screen::Time { .. }, InputEvent::Back) => Screen::Config { selected: 4 },
+        (Screen::Device, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 3 },
+        (Screen::Files, InputEvent::Back | InputEvent::Select) => Screen::Config { selected: 4 },
+        (Screen::Time { .. }, InputEvent::Back) => Screen::Config { selected: 5 },
         (Screen::Time { selected }, InputEvent::Up | InputEvent::Left) => Screen::Time {
             selected: selected.saturating_sub(1),
         },
@@ -630,14 +633,14 @@ fn reduce_screen(
                         log::warn!("manual sntp sync failed: {err:?}");
                     }
                 }
-                4 => return Screen::Config { selected: 4 },
+                4 => return Screen::Config { selected: 5 },
                 _ => {}
             }
             Screen::Time { selected }
         }
         (Screen::Audio { .. }, InputEvent::Back) => {
             save_config(board, config);
-            Screen::Config { selected: 5 }
+            Screen::Config { selected: 6 }
         }
         (Screen::Audio { selected }, InputEvent::Up) => Screen::Audio {
             selected: selected.saturating_sub(1),
@@ -655,12 +658,12 @@ fn reduce_screen(
         }
         (Screen::Audio { selected: 1 }, InputEvent::Select) => {
             save_config(board, config);
-            Screen::Config { selected: 5 }
+            Screen::Config { selected: 6 }
         }
         (Screen::Audio { selected }, _) => Screen::Audio { selected },
         (Screen::Channel9 { .. }, InputEvent::Back) => {
             cancel_channel9_logout_confirm(channel9_login);
-            Screen::Config { selected: 6 }
+            Screen::Config { selected: 7 }
         }
         (Screen::Channel9 { selected }, InputEvent::Up | InputEvent::Left) => {
             cancel_channel9_logout_confirm(channel9_login);
@@ -696,7 +699,7 @@ fn reduce_screen(
                     }
                     6 => {
                         cancel_channel9_logout_confirm(channel9_login);
-                        return Screen::Config { selected: 6 };
+                        return Screen::Config { selected: 7 };
                     }
                     _ => {
                         cancel_channel9_logout_confirm(channel9_login);
@@ -725,7 +728,7 @@ fn reduce_screen(
                         channel9_login.pending_request = Some(Channel9LoginRequest::Create);
                         channel9_login.message = "Refreshing...".to_owned();
                     }
-                    (false, 2) | (true, 3) => return Screen::Config { selected: 6 },
+                    (false, 2) | (true, 3) => return Screen::Config { selected: 7 },
                     _ => {}
                 }
             }
@@ -756,7 +759,7 @@ fn reduce_screen(
             channel9_login.message = "Press Refresh".to_owned();
             Screen::Channel9 { selected: 0 }
         }
-        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 7 },
+        (Screen::Recorder { .. }, InputEvent::Back) => Screen::Config { selected: 8 },
         (Screen::Recorder { selected }, InputEvent::Up | InputEvent::Left) => Screen::Recorder {
             selected: selected.saturating_sub(1),
         },
@@ -796,7 +799,7 @@ fn reduce_screen(
 }
 
 const CONFIG_ITEMS: &[&str] = &[
-    "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Channel9", "Recorder",
+    "Messages", "WiFi", "Storage", "Device", "Files", "Time", "Audio", "Channel9", "Recorder",
 ];
 const WIFI_ITEMS: &[&str] = &[
     "Auto Connect",
@@ -879,7 +882,40 @@ fn render_screen(
                 "",
                 "",
                 &items,
-                "SEL: Open  ESC: Back",
+                "ENTER: Open  ESC: Home",
+                status_bar,
+            )
+        }
+        Screen::Messages => {
+            let suggestion = truncate_runtime_label(channel9_push.suggestion.as_str());
+            let detail = truncate_runtime_label(channel9_push.detail.as_str());
+            let count = count_label(channel9_push.message_count);
+            let items = [
+                SettingItem {
+                    label: "Latest",
+                    value: suggestion.as_str(),
+                    selected: false,
+                    enabled: true,
+                },
+                SettingItem {
+                    label: "Status",
+                    value: detail.as_str(),
+                    selected: false,
+                    enabled: true,
+                },
+                SettingItem {
+                    label: "Count",
+                    value: count.as_str(),
+                    selected: false,
+                    enabled: true,
+                },
+            ];
+            channel9_ui::draw_settings_screen(
+                board.display_mut(),
+                "MESSAGES",
+                "Channel9 inbox",
+                &items,
+                "ENTER/ESC: Back",
                 status_bar,
             )
         }
@@ -1471,6 +1507,12 @@ fn timezone_offset_label(offset_minutes: i32) -> heapless::String<8> {
 fn percent_label(percent: u8) -> heapless::String<8> {
     let mut value = heapless::String::<8>::new();
     let _ = core::fmt::write(&mut value, format_args!("{}%", percent.min(100)));
+    value
+}
+
+fn count_label(count: usize) -> heapless::String<16> {
+    let mut value = heapless::String::<16>::new();
+    let _ = core::fmt::write(&mut value, format_args!("{count}"));
     value
 }
 

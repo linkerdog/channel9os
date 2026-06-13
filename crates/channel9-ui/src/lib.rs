@@ -180,7 +180,7 @@ where
     draw_text(display, view.suggestion, Point::new(18, 80), PRIMARY)?;
     draw_text(display, view.detail, Point::new(18, 98), MUTED)?;
 
-    draw_selected_button(display, "CFG", Point::new(190, 111), Size::new(34, 15))?;
+    draw_selected_button(display, "MENU", Point::new(184, 111), Size::new(40, 15))?;
 
     Ok(())
 }
@@ -203,7 +203,7 @@ where
     draw_menu_shell(display, footer, status)?;
 
     if items.is_empty() {
-        draw_text(display, "No config items", Point::new(18, 82), MUTED)?;
+        draw_text(display, "No functions", Point::new(18, 82), MUTED)?;
         return Ok(());
     }
 
