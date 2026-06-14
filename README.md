@@ -44,11 +44,10 @@ channel9 hello world on ESP32-S3
 The built-in display should show:
 
 ```text
-CHANNEL9
-Push suggestions
+PUSH
 No pushes yet
-Open config to setup WiFi
-SEL: Config
+Waiting for push
+MENU
 ```
 
 ## Crate Layout
@@ -56,40 +55,77 @@ SEL: Config
 - `esp32_channel9`: firmware entry point and runtime wiring.
 - `channel9-core`: device IDs and serializable app configuration.
 - `channel9-board`: board-specific hardware support. The current implementation is `CardputerAdv` with LCD, microSD, and TCA8418 keyboard input.
+- `channel9-runtime`: host-testable Channel9 device-code, token polling, and push/SSE state transitions.
 - `channel9-storage`: JSON config persistence, SD directory listing, and a `littlefs2` build probe.
 - `channel9-ui`: display rendering, Channel9 home screen, and Bruce-like menu/file screens.
 - `channel9-wifi`: ESP-IDF WiFi runtime, scan support, and saved-credential connection.
+
+## Test
+
+Firmware-level checks use the ESP target from `.cargo/config.toml`:
+
+```sh
+cargo fmt --check
+cargo check
+```
+
+Host-side Channel9 runtime tests must specify a host target because this repository defaults to the
+ESP target:
+
+```sh
+rustc -vV
+cargo +esp test -p channel9-runtime --target aarch64-apple-darwin
+```
+
+On GitHub Actions, `Host Tests` runs:
+
+```sh
+cargo +nightly test -p channel9-runtime --target x86_64-unknown-linux-gnu
+```
 
 ## Current Controls
 
 On Cardputer-Adv:
 
-- `Enter`: open the config menu from the Channel9 home screen.
-- `;` or `,`: move to the previous config item.
-- `.` or `/`: move to the next config item.
+- `Enter`: open the function menu from the Channel9 home screen, or select the highlighted item.
+- `;` or `,`: move to the previous item.
+- `.` or `/`: move to the next item.
 - `` ` `` or `Backspace`: go back.
 
-The config menu is a Bruce-like icon carousel. It currently exposes:
+The function menu is a phone-like icon carousel. It currently exposes:
 
+- `Messages`: shows latest Channel9 push text, connection status, and message count.
 - `WiFi`: configure WiFi startup behavior.
 - `Storage`: configure persistence behavior.
+- `Device`: shows board capability status.
 - `Files`: opens the SD file browser.
-- `Back`: returns to the Channel9 home screen.
+- `Time`: configures SNTP server, sync behavior, and UTC offset.
+- `Audio`: controls speaker volume.
+- `Channel9`: creates or refreshes device-code login, polls activation, and clears login.
+- `Recorder`: records, plays back, and deletes voice notes.
 
 Current WiFi settings:
 
 - `Auto Connect`: toggles `wifi.connect_at_startup` and persists it to `/sdcard/channel9/config.json`.
-- `Saved Networks`: read-only summary for now.
-- `Scan Networks`: scans nearby access points through `channel9-wifi` and shows the first results.
+- `Status`: shows current connection details, IP, and DNS.
+- `Saved Networks`: lists saved networks; `Enter` joins and `Backspace` deletes.
+- `Scan Networks`: scans nearby access points, lets the user choose one, and stores the password.
 
-If `Auto Connect` is enabled and at least one credential exists in the config, the firmware tries to
-connect to the first saved network during startup.
+If `Auto Connect` is enabled and at least one credential exists in the config, the firmware scans
+nearby APs and tries matching saved credentials in scan order.
 
 Current Storage settings:
 
 - `Prefer SD`: toggles `storage.prefer_sdcard` and persists it to `/sdcard/channel9/config.json`.
 - `Mount Path`: read-only mount path.
 - `Files`: opens the SD file browser when the SD card is mounted.
+
+Current Channel9 behavior:
+
+- Device-code creation and token polling run through a single serialized network worker.
+- Pending codes are polled automatically at the server-provided interval.
+- Activated devices open the Channel9 SSE endpoint through the same serialized worker.
+- New pushes update the home screen and play the pager-style notification sound.
 
 ## Cardputer-Adv LCD Pins
 
