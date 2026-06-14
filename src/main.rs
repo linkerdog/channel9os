@@ -1,8 +1,17 @@
 use anyhow::Result;
 use channel9_ble::{BleStatus, Channel9Ble};
 use channel9_board::{AudioStatus, CardputerAdv, ImuStatus, InputEvent};
-use channel9_client::{Channel9HttpClient, DeviceCode, DeviceEvents, DeviceMessage, PollToken};
+use channel9_client::{
+    Channel9HttpClient, DeviceCode as ClientDeviceCode, DeviceEvents as ClientDeviceEvents,
+    DeviceMessage as ClientDeviceMessage, DeviceToken as ClientDeviceToken,
+    PollToken as ClientPollToken,
+};
 use channel9_core::{AppConfig, WifiCredential};
+use channel9_runtime::{
+    Channel9LoginRequest, Channel9LoginState, Channel9NetworkDrain, Channel9NetworkRequest,
+    Channel9NetworkResponse, Channel9PushState, Channel9RuntimeConfig, Channel9SseDrain,
+    DeviceCode, DeviceEvents, DeviceMessage, DeviceToken, PollToken,
+};
 use channel9_storage::{ConfigStore, JsonConfigStore, list_directory, littlefs2_probe};
 use channel9_time::{Channel9Time, TimeSyncStatus, format_clock};
 use channel9_ui::{
@@ -14,7 +23,7 @@ use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::peripherals::Peripherals;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const UI_SCHEDULER_STACK_BYTES: usize = 8192;
 const CHANNEL9_NETWORK_STACK_BYTES: usize = 24 * 1024;
@@ -72,98 +81,9 @@ struct RecordingItem {
     size_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct Channel9LoginState {
-    active_code: Option<DeviceCode>,
-    message: String,
-    pending_request: Option<Channel9LoginRequest>,
-    inflight_request: Option<Channel9LoginRequest>,
-    next_poll_at: Option<Instant>,
-    logout_confirm: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Channel9PushState {
-    status: StatusChannel9,
-    suggestion: String,
-    detail: String,
-    message_count: usize,
-    last_cursor: Option<String>,
-    next_fetch_at: Option<Instant>,
-    consecutive_failures: u8,
-    fetch_in_flight: bool,
-}
-
-impl Default for Channel9PushState {
-    fn default() -> Self {
-        Self {
-            status: StatusChannel9::Off,
-            suggestion: "No pushes yet".to_owned(),
-            detail: "Waiting for push".to_owned(),
-            message_count: 0,
-            last_cursor: None,
-            next_fetch_at: None,
-            consecutive_failures: 0,
-            fetch_in_flight: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct Channel9SseDrain {
-    changed: bool,
-    new_messages: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel9LoginRequest {
-    Create,
-    Poll,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiEvent {
     ClockTick,
-}
-
-#[derive(Debug)]
-enum Channel9NetworkRequest {
-    CreateDeviceCode {
-        api_base_url: String,
-        device_id: String,
-        description: String,
-        interfaces: Vec<String>,
-    },
-    PollDeviceToken {
-        api_base_url: String,
-        device_code: String,
-    },
-    FetchDeviceEvents {
-        api_base_url: String,
-        device_id: String,
-        access_token: String,
-        interfaces: Vec<String>,
-        cursor: Option<String>,
-    },
-}
-
-#[derive(Debug)]
-enum Channel9NetworkResponse {
-    DeviceCode {
-        device_id: String,
-        result: Result<DeviceCode, String>,
-    },
-    DeviceToken {
-        device_code: String,
-        result: Result<PollToken, String>,
-    },
-    DeviceEvents(Result<DeviceEvents, String>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct Channel9NetworkDrain {
-    changed: bool,
-    new_messages: usize,
 }
 
 fn run_display() -> Result<()> {
@@ -1691,6 +1611,7 @@ fn run_channel9_network_request(request: Channel9NetworkRequest) -> Channel9Netw
             let client = Channel9HttpClient::new(api_base_url);
             let result = client
                 .create_device_code(device_id.as_str(), description.as_str(), &interfaces)
+                .map(runtime_device_code)
                 .map_err(|err| format!("{err:?}"));
             Channel9NetworkResponse::DeviceCode { device_id, result }
         }
@@ -1701,6 +1622,7 @@ fn run_channel9_network_request(request: Channel9NetworkRequest) -> Channel9Netw
             let client = Channel9HttpClient::new(api_base_url);
             let result = client
                 .poll_device_token(device_code.as_str())
+                .map(runtime_poll_token)
                 .map_err(|err| format!("{err:?}"));
             Channel9NetworkResponse::DeviceToken {
                 device_code,
@@ -1723,9 +1645,59 @@ fn run_channel9_network_request(request: Channel9NetworkRequest) -> Channel9Netw
                         &interfaces,
                         cursor.as_deref(),
                     )
+                    .map(runtime_device_events)
                     .map_err(|err| format!("{err:?}")),
             )
         }
+    }
+}
+
+fn runtime_device_code(code: ClientDeviceCode) -> DeviceCode {
+    DeviceCode {
+        device_code: code.device_code,
+        user_code: code.user_code,
+        verification_uri: code.verification_uri,
+        verification_uri_complete: code.verification_uri_complete,
+        expires_at: code.expires_at,
+        activation_expires_at: code.activation_expires_at,
+        interval_seconds: code.interval_seconds,
+    }
+}
+
+fn runtime_device_token(token: ClientDeviceToken) -> DeviceToken {
+    DeviceToken {
+        access_token: token.access_token,
+        token_type: token.token_type,
+        expires_at: token.expires_at,
+        workspace_id: token.workspace_id,
+        device_id: token.device_id,
+    }
+}
+
+fn runtime_poll_token(token: ClientPollToken) -> PollToken {
+    match token {
+        ClientPollToken::Pending => PollToken::Pending,
+        ClientPollToken::Approved(token) => PollToken::Approved(runtime_device_token(token)),
+    }
+}
+
+fn runtime_device_events(events: ClientDeviceEvents) -> DeviceEvents {
+    DeviceEvents {
+        connected: events.connected,
+        messages: events
+            .messages
+            .into_iter()
+            .map(runtime_device_message)
+            .collect(),
+    }
+}
+
+fn runtime_device_message(message: ClientDeviceMessage) -> DeviceMessage {
+    DeviceMessage {
+        cursor: message.cursor,
+        message_id: message.message_id,
+        target_interface: message.target_interface,
+        payload: message.payload,
     }
 }
 
@@ -1788,123 +1760,27 @@ fn maybe_poll_channel9_sse(
     push: &mut Channel9PushState,
     network: &SyncSender<Channel9NetworkRequest>,
 ) -> Channel9SseDrain {
-    if !channel9_sse_ready(config, wifi) {
-        let changed = push.status != StatusChannel9::Off;
-        push.status = StatusChannel9::Off;
-        push.consecutive_failures = 0;
-        push.fetch_in_flight = false;
-        if !channel9_logged_in(config) {
-            let default_push = Channel9PushState::default();
-            if *push != default_push {
-                *push = default_push;
-                return Channel9SseDrain {
-                    changed: true,
-                    new_messages: 0,
-                };
-            }
-        }
-        return Channel9SseDrain {
-            changed,
-            new_messages: 0,
-        };
-    }
-    if push.fetch_in_flight {
-        return Channel9SseDrain::default();
-    }
-
-    let should_poll = push
-        .next_fetch_at
-        .map(|next_fetch_at| Instant::now() >= next_fetch_at)
-        .unwrap_or(true);
-    if !should_poll {
-        return Channel9SseDrain::default();
-    }
-    push.next_fetch_at = Some(Instant::now() + CHANNEL9_SSE_INTERVAL);
-
-    let Some(access_token) = config.channel9.access_token.as_deref() else {
-        let changed = push.status != StatusChannel9::Off;
-        push.status = StatusChannel9::Off;
-        push.consecutive_failures = 0;
-        push.fetch_in_flight = false;
-        return Channel9SseDrain {
-            changed,
-            new_messages: 0,
-        };
-    };
-    let request = Channel9NetworkRequest::FetchDeviceEvents {
-        api_base_url: channel9_api_base_url(config).to_owned(),
-        device_id: config.channel9.device_id.clone(),
-        access_token: access_token.to_owned(),
-        interfaces: config.channel9.interfaces.clone(),
-        cursor: push.last_cursor.clone(),
-    };
+    let runtime_config = runtime_config(config);
+    let wifi_connected = wifi_connected(wifi);
+    let (drain, request) = channel9_runtime::maybe_build_channel9_sse_request(
+        &runtime_config,
+        wifi_connected,
+        push,
+        CHANNEL9_SSE_INTERVAL,
+    );
+    let Some(request) = request else { return drain };
     match network.try_send(request) {
-        Ok(()) => {
-            push.fetch_in_flight = true;
-            Channel9SseDrain::default()
-        }
+        Ok(()) => drain,
         Err(TrySendError::Full(_)) => {
+            push.fetch_in_flight = false;
             push.next_fetch_at = Some(Instant::now() + Duration::from_secs(1));
-            Channel9SseDrain::default()
+            drain
         }
         Err(TrySendError::Disconnected(_)) => {
             log::warn!("channel9 network worker disconnected");
-            mark_channel9_sse_failure(push)
+            channel9_runtime::mark_channel9_sse_failure(push, CHANNEL9_SSE_FAILURE_THRESHOLD)
         }
     }
-}
-
-fn mark_channel9_sse_failure(push: &mut Channel9PushState) -> Channel9SseDrain {
-    push.fetch_in_flight = false;
-    push.consecutive_failures = push.consecutive_failures.saturating_add(1);
-    if push.consecutive_failures < CHANNEL9_SSE_FAILURE_THRESHOLD {
-        return Channel9SseDrain::default();
-    }
-    let changed = push.status != StatusChannel9::Failed;
-    push.status = StatusChannel9::Failed;
-    Channel9SseDrain {
-        changed,
-        new_messages: 0,
-    }
-}
-
-fn apply_channel9_sse_messages(
-    push: &mut Channel9PushState,
-    messages: Vec<DeviceMessage>,
-) -> Channel9SseDrain {
-    let mut drain = Channel9SseDrain::default();
-    let status_changed = push.status != StatusChannel9::Online;
-    push.status = StatusChannel9::Online;
-    push.consecutive_failures = 0;
-    push.fetch_in_flight = false;
-    if messages.is_empty() {
-        if push.message_count == 0 {
-            let detail_changed = push.detail != "Listening for pushes";
-            if detail_changed {
-                push.detail = "Listening for pushes".to_owned();
-            }
-            drain.changed = status_changed || detail_changed;
-        } else {
-            drain.changed = status_changed;
-        }
-        return drain;
-    }
-    for message in messages {
-        drain.new_messages = drain.new_messages.saturating_add(1);
-        push.message_count = push.message_count.saturating_add(1);
-        push.last_cursor = Some(message.cursor.clone());
-        push.suggestion = message.display_text();
-        push.detail = message.detail_text();
-    }
-    drain.changed = true;
-    drain
-}
-
-fn channel9_sse_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
-    channel9_logged_in(config)
-        && wifi
-            .map(|wifi| wifi.status() == WifiStatus::Connected)
-            .unwrap_or(false)
 }
 
 fn visible_setting_items<'a>(items: &[SettingItem<'a>], selected: usize) -> Vec<SettingItem<'a>> {
@@ -1927,11 +1803,7 @@ fn apply_wifi_setting(board: &CardputerAdv, config: &mut AppConfig, selected: us
             config.wifi.connect_at_startup = !config.wifi.connect_at_startup;
             save_config(board, config);
         }
-        3 => {}
-        _ => log::info!(
-            "wifi setting is not implemented yet: {}",
-            WIFI_ITEMS[selected]
-        ),
+        _ => {}
     }
 }
 
@@ -1965,72 +1837,31 @@ fn process_channel9_login_request(
     config: &AppConfig,
     login: &mut Channel9LoginState,
 ) -> bool {
-    if login.inflight_request.is_some() {
-        return false;
-    }
-    let Some(request) = login.pending_request.take() else {
-        return false;
+    let request_kind = login.pending_request;
+    let Some(network_request) = channel9_runtime::build_channel9_login_request(
+        &runtime_config(config),
+        login,
+        wifi_connected(wifi),
+    ) else {
+        return request_kind.is_some();
     };
-    let network_request = match request {
-        Channel9LoginRequest::Create => {
-            login.message.clear();
-            if let Some(reason) = channel9_login_blocked_reason(config, wifi) {
-                login.message = reason.to_owned();
-                return true;
-            }
-            Channel9NetworkRequest::CreateDeviceCode {
-                api_base_url: channel9_api_base_url(config).to_owned(),
-                device_id: config.channel9.device_id.clone(),
-                description: config.channel9.description.clone(),
-                interfaces: config.channel9.interfaces.clone(),
-            }
-        }
-        Channel9LoginRequest::Poll => {
-            login.message.clear();
-            if !wifi
-                .map(|wifi| wifi.status() == WifiStatus::Connected)
-                .unwrap_or(false)
-            {
-                login.next_poll_at = login
-                    .active_code
-                    .as_ref()
-                    .map(|code| Instant::now() + channel9_poll_interval(code));
-                login.message = "WiFi offline".to_owned();
-                return true;
-            }
-            if login.active_code.is_none() {
-                login.message = "Create code first".to_owned();
-                return true;
-            }
-            if channel9_active_code_expired(login) {
-                login.active_code = None;
-                login.next_poll_at = None;
-                login.message = "Code expired".to_owned();
-                return true;
-            }
-            let Some(code) = login.active_code.as_ref() else {
-                login.message = "Create code first".to_owned();
-                return true;
-            };
-            Channel9NetworkRequest::PollDeviceToken {
-                api_base_url: channel9_api_base_url(config).to_owned(),
-                device_code: code.device_code.clone(),
-            }
-        }
+    let Some(request_kind) = request_kind else {
+        return false;
     };
     match network.try_send(network_request) {
-        Ok(()) => {
-            login.inflight_request = Some(request);
-            true
-        }
+        Ok(()) => true,
         Err(TrySendError::Full(request_payload)) => {
-            login.pending_request = Some(request);
-            login.message = "Network busy".to_owned();
-            login.next_poll_at = Some(Instant::now() + Duration::from_secs(1));
+            login.inflight_request = None;
+            channel9_runtime::backoff_channel9_login_request(
+                login,
+                request_kind,
+                Duration::from_secs(1),
+            );
             drop(request_payload);
             true
         }
         Err(TrySendError::Disconnected(request_payload)) => {
+            login.inflight_request = None;
             login.message = "Network unavailable".to_owned();
             drop(request_payload);
             true
@@ -2039,31 +1870,7 @@ fn process_channel9_login_request(
 }
 
 fn maybe_schedule_channel9_auto_poll(config: &AppConfig, login: &mut Channel9LoginState) -> bool {
-    if channel9_logged_in(config)
-        || login.active_code.is_none()
-        || login.pending_request.is_some()
-        || login.inflight_request.is_some()
-    {
-        return false;
-    }
-    if channel9_active_code_expired(login) {
-        login.active_code = None;
-        login.next_poll_at = None;
-        login.message = "Code expired".to_owned();
-        return false;
-    }
-
-    let should_poll = login
-        .next_poll_at
-        .map(|next_poll_at| Instant::now() >= next_poll_at)
-        .unwrap_or(true);
-    if !should_poll {
-        return false;
-    }
-
-    login.pending_request = Some(Channel9LoginRequest::Poll);
-    login.message = "Checking approval".to_owned();
-    true
+    channel9_runtime::maybe_schedule_channel9_auto_poll(&runtime_config(config), login)
 }
 
 fn drain_channel9_network_results(
@@ -2097,106 +1904,23 @@ fn apply_channel9_network_response(
     login: &mut Channel9LoginState,
     push: &mut Channel9PushState,
 ) -> Channel9NetworkDrain {
-    match response {
-        Channel9NetworkResponse::DeviceCode { device_id, result } => {
-            login.inflight_request = None;
-            if config.channel9.device_id != device_id {
-                return Channel9NetworkDrain::default();
-            }
-            match result {
-                Ok(code) => {
-                    let user_code = channel9_format_user_code(code.user_code.as_str());
-                    login.next_poll_at = Some(Instant::now() + channel9_poll_interval(&code));
-                    login.message = format!("Waiting {user_code}");
-                    login.active_code = Some(code);
-                    config.channel9.access_token = None;
-                    config.channel9.token_expires_at = None;
-                    save_config(board, config);
-                }
-                Err(err) => {
-                    log::warn!("channel9 device code create failed: {err}");
-                    log_channel9_network_context("create", config, wifi);
-                    login.message = channel9_error_label_from_string("Create failed", wifi, &err);
-                }
-            }
-            Channel9NetworkDrain {
-                changed: true,
-                new_messages: 0,
-            }
-        }
-        Channel9NetworkResponse::DeviceToken {
-            device_code,
-            result,
-        } => {
-            login.inflight_request = None;
-            if login
-                .active_code
-                .as_ref()
-                .map(|code| code.device_code.as_str())
-                != Some(device_code.as_str())
-            {
-                return Channel9NetworkDrain::default();
-            }
-            let Some(code) = login.active_code.as_ref() else {
-                return Channel9NetworkDrain::default();
-            };
-            match result {
-                Ok(PollToken::Pending) => {
-                    let user_code = channel9_format_user_code(code.user_code.as_str());
-                    login.next_poll_at = Some(Instant::now() + channel9_poll_interval(code));
-                    login.message = format!("Waiting {user_code}");
-                }
-                Ok(PollToken::Approved(token)) => {
-                    config.channel9.access_token = Some(token.access_token);
-                    config.channel9.token_expires_at = Some(token.expires_at);
-                    config.channel9.workspace_id = token.workspace_id;
-                    config.channel9.device_id = token.device_id;
-                    login.message = "Activated".to_owned();
-                    login.active_code = None;
-                    login.next_poll_at = None;
-                    save_config(board, config);
-                }
-                Err(err) => {
-                    login.next_poll_at = login
-                        .active_code
-                        .as_ref()
-                        .map(|code| Instant::now() + channel9_poll_interval(code));
-                    log::warn!("channel9 token poll failed: {err}");
-                    log_channel9_network_context("poll", config, wifi);
-                    login.message = channel9_error_label_from_string("Poll failed", wifi, &err);
-                }
-            }
-            Channel9NetworkDrain {
-                changed: true,
-                new_messages: 0,
-            }
-        }
-        Channel9NetworkResponse::DeviceEvents(result) => {
-            if !channel9_sse_ready(config, wifi) {
-                push.fetch_in_flight = false;
-                return Channel9NetworkDrain::default();
-            }
-            let sse_drain = match result {
-                Ok(events) => {
-                    if !events.connected {
-                        log::warn!("channel9 sse returned no heartbeat or message");
-                        mark_channel9_sse_failure(push)
-                    } else {
-                        apply_channel9_sse_messages(push, events.messages)
-                    }
-                }
-                Err(err) => {
-                    log::warn!("channel9 sse fetch failed: {err}");
-                    log_channel9_network_context("sse", config, wifi);
-                    mark_channel9_sse_failure(push)
-                }
-            };
-            Channel9NetworkDrain {
-                changed: sse_drain.changed,
-                new_messages: sse_drain.new_messages,
-            }
-        }
+    log_channel9_network_response(&response, config, wifi);
+    let mut runtime_config = runtime_config(config);
+    let previous_config = runtime_config.clone();
+    let drain = channel9_runtime::apply_channel9_network_response(
+        response.clone(),
+        &mut runtime_config,
+        login,
+        push,
+        wifi_connected(wifi),
+        CHANNEL9_SSE_FAILURE_THRESHOLD,
+    );
+    apply_runtime_config(config, &runtime_config);
+    if runtime_config != previous_config {
+        save_config(board, config);
     }
+    apply_channel9_error_label(response, wifi, login);
+    drain
 }
 
 fn cancel_channel9_logout_confirm(login: &mut Channel9LoginState) {
@@ -2204,22 +1928,6 @@ fn cancel_channel9_logout_confirm(login: &mut Channel9LoginState) {
         login.logout_confirm = false;
         login.message.clear();
     }
-}
-
-fn channel9_poll_interval(code: &DeviceCode) -> Duration {
-    let seconds = code.interval_seconds.clamp(1, 60) as u64;
-    Duration::from_secs(seconds)
-}
-
-fn channel9_active_code_expired(login: &Channel9LoginState) -> bool {
-    let Some(code) = login.active_code.as_ref() else {
-        return false;
-    };
-    let Ok(elapsed) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-    let now = elapsed.as_secs() as i64;
-    now >= code.activation_expires_at
 }
 
 fn channel9_login_ready(config: &AppConfig, wifi: Option<&Channel9Wifi>) -> bool {
@@ -2230,20 +1938,12 @@ fn channel9_login_blocked_reason(
     config: &AppConfig,
     wifi: Option<&Channel9Wifi>,
 ) -> Option<&'static str> {
-    if config.channel9.device_id.trim().is_empty() {
-        return Some("Set Device first");
-    }
-    if !wifi
-        .map(|wifi| wifi.status() == WifiStatus::Connected)
-        .unwrap_or(false)
-    {
-        return Some("WiFi offline");
-    }
-    None
+    channel9_runtime::channel9_login_blocked_reason(&runtime_config(config), wifi_connected(wifi))
+        .map(|reason| reason.label())
 }
 
 fn channel9_logged_in(config: &AppConfig) -> bool {
-    config.channel9.access_token.is_some()
+    channel9_runtime::channel9_logged_in(&runtime_config(config))
 }
 
 fn channel9_api_base_url(config: &AppConfig) -> &str {
@@ -2262,6 +1962,79 @@ fn channel9_item_count(config: &AppConfig, login: &Channel9LoginState) -> usize 
         4
     } else {
         3
+    }
+}
+
+fn runtime_config(config: &AppConfig) -> Channel9RuntimeConfig {
+    Channel9RuntimeConfig {
+        api_base_url: channel9_api_base_url(config).to_owned(),
+        device_id: config.channel9.device_id.clone(),
+        description: config.channel9.description.clone(),
+        interfaces: config.channel9.interfaces.clone(),
+        workspace_id: config.channel9.workspace_id.clone(),
+        access_token: config.channel9.access_token.clone(),
+        token_expires_at: config.channel9.token_expires_at,
+    }
+}
+
+fn apply_runtime_config(config: &mut AppConfig, runtime: &Channel9RuntimeConfig) {
+    config.channel9.device_id = runtime.device_id.clone();
+    config.channel9.workspace_id = runtime.workspace_id.clone();
+    config.channel9.access_token = runtime.access_token.clone();
+    config.channel9.token_expires_at = runtime.token_expires_at;
+}
+
+fn wifi_connected(wifi: Option<&Channel9Wifi>) -> bool {
+    wifi.map(|wifi| wifi.status() == WifiStatus::Connected)
+        .unwrap_or(false)
+}
+
+fn log_channel9_network_response(
+    response: &Channel9NetworkResponse,
+    config: &AppConfig,
+    wifi: Option<&Channel9Wifi>,
+) {
+    match response {
+        Channel9NetworkResponse::DeviceCode {
+            result: Err(err), ..
+        } => {
+            log::warn!("channel9 device code create failed: {err}");
+            log_channel9_network_context("create", config, wifi);
+        }
+        Channel9NetworkResponse::DeviceToken {
+            result: Err(err), ..
+        } => {
+            log::warn!("channel9 token poll failed: {err}");
+            log_channel9_network_context("poll", config, wifi);
+        }
+        Channel9NetworkResponse::DeviceEvents(Ok(events)) if !events.connected => {
+            log::warn!("channel9 sse returned no heartbeat or message");
+        }
+        Channel9NetworkResponse::DeviceEvents(Err(err)) => {
+            log::warn!("channel9 sse fetch failed: {err}");
+            log_channel9_network_context("sse", config, wifi);
+        }
+        _ => {}
+    }
+}
+
+fn apply_channel9_error_label(
+    response: Channel9NetworkResponse,
+    wifi: Option<&Channel9Wifi>,
+    login: &mut Channel9LoginState,
+) {
+    match response {
+        Channel9NetworkResponse::DeviceCode {
+            result: Err(err), ..
+        } => {
+            login.message = channel9_error_label_from_string("Create failed", wifi, &err);
+        }
+        Channel9NetworkResponse::DeviceToken {
+            result: Err(err), ..
+        } => {
+            login.message = channel9_error_label_from_string("Poll failed", wifi, &err);
+        }
+        _ => {}
     }
 }
 
@@ -2284,14 +2057,7 @@ fn channel9_user_code_label(
 
 fn channel9_format_user_code(value: &str) -> heapless::String<16> {
     let mut output = heapless::String::<16>::new();
-    let normalized = value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_uppercase());
-    for (index, ch) in normalized.take(12).enumerate() {
-        if index == 4 {
-            let _ = output.push('-');
-        }
+    for ch in channel9_runtime::format_user_code(value).chars() {
         let _ = output.push(ch);
     }
     output
