@@ -278,6 +278,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "channel9-runtime"
+version = "0.1.0"
+dependencies = [
+ "channel9-ui",
+ "serde_json",
+]
+
+[[package]]
 name = "channel9-storage"
 version = "0.1.0"
 dependencies = [
@@ -795,6 +803,7 @@ dependencies = [
  "channel9-client",
  "channel9-core",
  "channel9-fs",
+ "channel9-runtime",
  "channel9-storage",
  "channel9-time",
  "channel9-ui",

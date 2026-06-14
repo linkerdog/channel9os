@@ -13,6 +13,22 @@ The current board implementation is Cardputer-Adv.
 - Use `cargo fmt --check` and `cargo check` before reporting firmware changes as ready.
 - Do not remove or rewrite unrelated user changes.
 
+## Testing
+
+- Use `cargo fmt --check` and `cargo check` for firmware-level validation.
+- Use `cargo +<host-toolchain> test -p channel9-runtime --target <host-triple>` for host-side
+  Channel9 runtime state-machine tests. The explicit toolchain is required because this repository's
+  `rust-toolchain.toml` points at the ESP `esp` toolchain, and the host toolchain needs `rust-src`
+  because `.cargo/config.toml` enables `build-std`. Get the local host triple from
+  `rustc -vV`; GitHub Actions uses `cargo +nightly test -p channel9-runtime --target
+  x86_64-unknown-linux-gnu`.
+- Keep host-testable Channel9 state transitions in `crates/channel9-runtime`; avoid adding ESP-IDF,
+  board, WiFi, display, or storage dependencies to that crate.
+- Add or update `channel9-runtime` tests when changing device-code login, token polling, SSE polling,
+  push rendering state, network queue backoff, stale response handling, or logout/offline cleanup.
+- Keep GitHub Actions split by purpose: `.github/workflows/ci.yml` validates firmware with the ESP
+  toolchain, while `.github/workflows/host-tests.yml` runs host-side Rust tests.
+
 ## Channel9 Device Login Contract
 
 Channel9 device-code login follows the SaaS spec in `docs/channel9-device-code-login.md`.

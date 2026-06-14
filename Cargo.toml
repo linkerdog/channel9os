@@ -11,6 +11,7 @@ members = [
     "crates/channel9-client",
     "crates/channel9-core",
     "crates/channel9-fs",
+    "crates/channel9-runtime",
     "crates/channel9-storage",
     "crates/channel9-time",
     "crates/channel9-ui",
@@ -43,6 +44,7 @@ channel9-board = { path = "crates/channel9-board" }
 channel9-client = { path = "crates/channel9-client" }
 channel9-core = { path = "crates/channel9-core" }
 channel9-fs = { path = "crates/channel9-fs" }
+channel9-runtime = { path = "crates/channel9-runtime" }
 channel9-storage = { path = "crates/channel9-storage" }
 channel9-time = { path = "crates/channel9-time" }
 channel9-ui = { path = "crates/channel9-ui" }
