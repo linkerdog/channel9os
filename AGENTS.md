@@ -16,9 +16,11 @@ The current board implementation is Cardputer-Adv.
 ## Testing
 
 - Use `cargo fmt --check` and `cargo check` for firmware-level validation.
-- Use `cargo test -p channel9-runtime --target <host-triple>` for host-side Channel9 runtime
-  state-machine tests. Get the local host triple from `rustc -vV`; GitHub Actions uses
-  `x86_64-unknown-linux-gnu`.
+- Use `cargo +<host-toolchain> test -p channel9-runtime --target <host-triple>` for host-side
+  Channel9 runtime state-machine tests. The explicit toolchain is required because this repository's
+  `rust-toolchain.toml` points at the ESP `esp` toolchain. Get the local host triple from
+  `rustc -vV`; GitHub Actions uses `cargo +nightly test -p channel9-runtime --target
+  x86_64-unknown-linux-gnu`.
 - Keep host-testable Channel9 state transitions in `crates/channel9-runtime`; avoid adding ESP-IDF,
   board, WiFi, display, or storage dependencies to that crate.
 - Add or update `channel9-runtime` tests when changing device-code login, token polling, SSE polling,
