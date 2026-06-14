@@ -2026,6 +2026,7 @@ fn process_channel9_login_request(
         Err(TrySendError::Full(request_payload)) => {
             login.pending_request = Some(request);
             login.message = "Network busy".to_owned();
+            login.next_poll_at = Some(Instant::now() + Duration::from_secs(1));
             drop(request_payload);
             true
         }
